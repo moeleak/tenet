@@ -1,0 +1,18 @@
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Build outputs
+tenet
+*.o
+
+# Runtime data
+tenet-users.db
+*.db
+*.sock
+
+# Editor and OS noise
+.DS_Store
+*.swp
+*~

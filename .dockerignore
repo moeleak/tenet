@@ -1,0 +1,7 @@
+tenet
+*.o
+src/*.o
+.git
+.gitignore
+Dockerfile
+README.md

@@ -1,0 +1,59 @@
+services:
+  tenet:
+    build:
+      context: .
+    image: tenet:local
+    container_name: tenet
+    restart: unless-stopped
+    ports:
+      - "${TENET_PUBLISHED_PORT:-2222}:2222"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      TENET_AUTH_MODE: "${TENET_AUTH_MODE:-ldap}"
+      TENET_USER: "${TENET_USER:-tenet}"
+      TENET_PASSWORD: "${TENET_PASSWORD:-tenet}"
+      TENET_DISABLE_PASSWORD_AUTH: "${TENET_DISABLE_PASSWORD_AUTH:-0}"
+      TENET_ENABLE_SSH_COPY_ID: "${TENET_ENABLE_SSH_COPY_ID:-1}"
+      TENET_ENABLE_LOCAL_GATEWAY: "${TENET_ENABLE_LOCAL_GATEWAY:-1}"
+      TENET_REGISTRATION_USER: "${TENET_REGISTRATION_USER:-tenet}"
+      TENET_LOCAL_GATEWAY_USERS: "${TENET_LOCAL_GATEWAY_USERS:-tenet}"
+      TENET_AUTHORIZED_KEYS: "${TENET_AUTHORIZED_KEYS:-}"
+      TENET_AUTHORIZED_KEYS_DIR: "${TENET_AUTHORIZED_KEYS_DIR:-/var/lib/tenet/ssh/authorized_keys.d}"
+      TENET_SSH_PORT: "2222"
+      TENET_SOCKET: "/run/tenet/tenet.sock"
+      TENET_MAX_CLIENTS: "${TENET_MAX_CLIENTS:-64}"
+      TENET_LOCAL_USER_DB: "${TENET_LOCAL_USER_DB:-/var/lib/tenet/users.db}"
+      TENET_SYNC_LOCAL_SSH_USERS: "${TENET_SYNC_LOCAL_SSH_USERS:-1}"
+      TENET_BACKEND_ARGS: "${TENET_BACKEND_ARGS:-}"
+      TENET_LDAP_HOST: "${TENET_LDAP_HOST:-ldap.example.org}"
+      TENET_LDAP_PORT: "${TENET_LDAP_PORT:-389}"
+      TENET_LDAP_BASE_DN: "${TENET_LDAP_BASE_DN:-DC=example,DC=org}"
+      TENET_LDAP_URI: "${TENET_LDAP_URI:-}"
+      TENET_LDAP_DOMAIN: "${TENET_LDAP_DOMAIN:-tenet}"
+      TENET_LDAP_SCHEMA: "${TENET_LDAP_SCHEMA:-ad}"
+      TENET_LDAP_USER_NAME_ATTR: "${TENET_LDAP_USER_NAME_ATTR:-sAMAccountName}"
+      TENET_LDAP_USER_FULLNAME_ATTR: "${TENET_LDAP_USER_FULLNAME_ATTR:-displayName}"
+      TENET_LDAP_USER_OBJECT_CLASS: "${TENET_LDAP_USER_OBJECT_CLASS:-user}"
+      TENET_LDAP_GROUP_OBJECT_CLASS: "${TENET_LDAP_GROUP_OBJECT_CLASS:-group}"
+      TENET_LDAP_REFERRALS: "${TENET_LDAP_REFERRALS:-0}"
+      TENET_LDAP_NETWORK_TIMEOUT: "${TENET_LDAP_NETWORK_TIMEOUT:-5}"
+      TENET_LDAP_OPT_TIMEOUT: "${TENET_LDAP_OPT_TIMEOUT:-5}"
+      TENET_LDAP_SEARCH_TIMEOUT: "${TENET_LDAP_SEARCH_TIMEOUT:-10}"
+      TENET_LDAP_BIND_DN: "${TENET_LDAP_BIND_DN:-}"
+      TENET_LDAP_BIND_PASSWORD: "${TENET_LDAP_BIND_PASSWORD:-}"
+      TENET_LDAP_ACCESS_FILTER: "${TENET_LDAP_ACCESS_FILTER:-}"
+      TENET_LDAP_TEST_USER: "${TENET_LDAP_TEST_USER:-}"
+      TENET_ALLOW_USERS: "${TENET_ALLOW_USERS:-}"
+      TENET_ALLOW_GROUPS: "${TENET_ALLOW_GROUPS:-}"
+    volumes:
+      - tenet_data:/var/lib/tenet
+      - tenet_home:/home
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/tenet/tenet.sock && /usr/sbin/sshd -t -f /etc/ssh/sshd_config"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  tenet_data:
+  tenet_home:
