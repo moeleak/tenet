@@ -5,10 +5,12 @@
 
 # Build outputs
 tenet
+tenet-bot
 *.o
 
 # Runtime data
 tenet-users.db
+tenet-bot-memory.sqlite3*
 *.db
 *.sock
 

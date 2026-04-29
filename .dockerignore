@@ -1,6 +1,9 @@
 tenet
+tenet-bot
 *.o
 src/*.o
+.env
+.env.*
 .git
 .gitignore
 Dockerfile

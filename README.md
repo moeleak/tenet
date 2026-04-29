@@ -195,3 +195,56 @@ WantedBy=multi-user.target
 ```
 
 如果使用 `RuntimeDirectory=tenet`，把 socket 路径改成 `/run/tenet/tenet.sock`，并在 sshd `ForceCommand` 中使用同一路径。
+
+## tenet-bot
+
+`tenet-bot` 是 tenet 的本地 AI 客户端。它通过 Unix socket 以普通 tenet 用户接入聊天室，默认只响应 `@tenet-bot` 提及，并调用本机 Ollama：
+
+- 聊天模型：`qwen3.5:9b`
+- Embedding 模型：`qwen3-embedding:4b`
+- Ollama URL：`http://127.0.0.1:11434`
+- 记忆库：`tenet-bot-memory.sqlite3`
+
+推荐先进入 Nix 开发环境，它会提供 SQLite、sqlite-vss、Ollama 和构建工具，并自动导出 sqlite-vss 扩展路径；如果没有 sqlite-vss，bot 会回退到 SQLite 扫描检索：
+
+```sh
+nix develop path:$PWD
+make
+```
+
+也可以在非 Nix 环境安装 `sqlite3` 开发库后构建；`sqlite-vss` 是可选加速：
+
+```sh
+make tenet-bot
+```
+
+本地启动示例（`tenet-bot` 会自动读取当前目录 `.env`）：
+
+```sh
+ollama pull qwen3.5:9b
+ollama pull qwen3-embedding:4b
+./tenet --ssh-backend --socket /tmp/tenet.sock
+./tenet-bot --socket /tmp/tenet.sock
+```
+
+常用选项：
+
+```text
+--ollama-url URL           Ollama URL
+--memory-db PATH           SQLite 记忆库路径
+--vector-extension PATH    sqlite-vss vector0 扩展路径
+--vss-extension PATH       sqlite-vss vss0 扩展路径
+--context-messages N       每次请求带最近 N 条上下文，默认 50
+--memory-top-k N           全局/用户长期记忆各检索 N 条，默认 6
+--reset-memory             清空长期记忆后启动
+```
+
+Docker Compose 会从 `.env` 注入 `TENET_BOT_OLLAMA_URL`、`TENET_BOT_CHAT_MODEL` 和 `TENET_BOT_EMBED_MODEL`；默认用 `http://host.docker.internal:11434` 访问宿主机 Ollama。
+
+```sh
+cp .env.example .env
+$EDITOR .env
+docker compose up -d --build
+```
+
+`tenet-bot` 会把每次问答写入 SQLite，同时写入全局记忆和该用户记忆；后续请求会先用 `/api/embed` 做向量检索，再把相关记忆、摘要和最近上下文放进 `/api/chat` 的 prompt。
