@@ -270,15 +270,14 @@ static void answer_message(const bot_config_t *config,
     const char *system_prompt =
         "你是 tenet-bot，一个运行在 tenet 终端聊天室里的 AI 助手。"
         "你能看到长期记忆、相关向量检索结果和最近上下文。"
-        "优先用中文简洁回答；不知道就说不知道；不要假装看到了不存在的信息。";
+        "优先用中文简洁回答；不知道就说不知道；不要假装看到了不存在的信息。"
+        "不要输出 <think> 标签、推理过程或内部思考。";
 
     build_question(config, message->text, question, sizeof(question));
-    snprintf(prefix, sizeof(prefix), "@%.200s ", message->sender);
-
-    {
-        char line[BOT_MAX_SENDER + 96];
-        snprintf(line, sizeof(line), "%s收到，正在思考...", prefix);
-        (void)bot_protocol_send_message(fd, line);
+    if (message->private_chat) {
+        prefix[0] = '\0';
+    } else {
+        snprintf(prefix, sizeof(prefix), "@%.200s ", message->sender);
     }
 
     query_vector.values = NULL;
@@ -306,13 +305,20 @@ static void answer_message(const bot_config_t *config,
     }
     if (bot_ollama_chat(config, system_prompt, prompt.data, &answer, error, sizeof(error)) != 0) {
         char line[768];
-        snprintf(line, sizeof(line), "@%.200s Ollama 调用失败：%.500s", message->sender, error);
+        if (message->private_chat) {
+            snprintf(line, sizeof(line), "Ollama 调用失败：%.650s", error);
+        } else {
+            snprintf(line, sizeof(line), "@%.200s Ollama 调用失败：%.500s", message->sender, error);
+        }
         (void)bot_protocol_send_message(fd, line);
         goto out;
     }
     if (send_reply_chunks(fd, prefix, answer.data) != 0) {
         fprintf(stderr, "tenet-bot: 发送回复失败\n");
         goto out;
+    }
+    if (message->private_chat) {
+        (void)bot_protocol_send_message(fd, "/close");
     }
     remember_exchange(config, memory, message->sender, question, answer.data);
 
@@ -342,7 +348,7 @@ static void handle_screen_messages(const bot_config_t *config,
             (void)bot_memory_mark_seen(memory, messages[i].fingerprint);
         }
         *primed = 1;
-        fprintf(stderr, "tenet-bot: 已进入聊天室，等待 @%s\n", config->username);
+        fprintf(stderr, "tenet-bot: 已进入聊天室，等待 @%s 或私聊\n", config->username);
         return;
     }
     for (i = 0; i < count; i++) {
@@ -353,7 +359,7 @@ static void handle_screen_messages(const bot_config_t *config,
         if (sender_is_bot(config, messages[i].sender)) {
             continue;
         }
-        if (!message_mentions_bot(config, messages[i].text)) {
+        if (!messages[i].private_chat && !message_mentions_bot(config, messages[i].text)) {
             continue;
         }
         answer_message(config, memory, fd, &messages[i]);

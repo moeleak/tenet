@@ -57,6 +57,34 @@ int ascii_equal_ignore_case(const char *left, const char *right)
     return *left == '\0' && *right == '\0';
 }
 
+static int username_in_list(const char *list, const char *username)
+{
+    const char *cursor = list;
+
+    if (list == NULL || username == NULL || username[0] == '\0') {
+        return 0;
+    }
+    while (*cursor != '\0') {
+        char token[TENET_MAX_USERNAME];
+        size_t len = 0;
+
+        while (*cursor != '\0' && (isspace((unsigned char)*cursor) || *cursor == ',')) {
+            cursor++;
+        }
+        while (*cursor != '\0' && !isspace((unsigned char)*cursor) && *cursor != ',') {
+            if (len + 1 < sizeof(token)) {
+                token[len++] = *cursor;
+            }
+            cursor++;
+        }
+        token[len] = '\0';
+        if (token[0] != '\0' && ascii_equal_ignore_case(token, username)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 static int ascii_starts_with_ignore_case(const char *text, const char *prefix)
 {
     while (*prefix != '\0') {
@@ -2846,6 +2874,11 @@ static void send_private_message(server_state_t *state, client_t *sender, const 
 
     (void)add_private_peer(sender, recipient->username);
     (void)add_private_peer(recipient, sender->username);
+    if (username_in_list(state->config->internal_users, recipient->username)) {
+        (void)switch_to_private_peer(recipient, sender->username);
+        snprintf(recipient->status_line, sizeof(recipient->status_line),
+                 "正在和 %s 私聊。", client_name(sender));
+    }
     add_private_multiline_message_locked(state, timebuf, sender, recipient, message);
     sender->history_scroll_rows = 0;
     mark_private_unread(sender, recipient->username);

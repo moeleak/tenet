@@ -203,7 +203,7 @@ WantedBy=multi-user.target
 
 ## tenet-bot
 
-`tenet-bot` 是 tenet 的本地 AI 客户端。它通过 Unix socket 以普通 tenet 用户接入聊天室，默认只响应 `@tenet-bot` 提及，并调用本机 Ollama：
+`tenet-bot` 是 tenet 的本地 AI 客户端。它通过 Unix socket 以普通 tenet 用户接入聊天室；大厅里默认只响应 `@tenet-bot` 提及，私聊里无需 `@` 也会回复，并调用本机 Ollama：
 
 - 聊天模型：`qwen3.5:9b`
 - Embedding 模型：`qwen3-embedding:4b`

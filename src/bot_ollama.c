@@ -14,6 +14,49 @@ static void set_error(char *error, size_t error_size, const char *message)
     }
 }
 
+static char *find_ascii_case_insensitive(char *haystack, const char *needle)
+{
+    size_t needle_len = strlen(needle);
+
+    if (needle_len == 0) {
+        return haystack;
+    }
+    for (; *haystack != '\0'; haystack++) {
+        size_t index;
+
+        for (index = 0; index < needle_len; index++) {
+            if (haystack[index] == '\0' ||
+                tolower((unsigned char)haystack[index]) !=
+                tolower((unsigned char)needle[index])) {
+                break;
+            }
+        }
+        if (index == needle_len) {
+            return haystack;
+        }
+    }
+    return NULL;
+}
+
+static void strip_think_blocks(char *text)
+{
+    char *start;
+
+    if (text == NULL) {
+        return;
+    }
+    while ((start = find_ascii_case_insensitive(text, "<think")) != NULL) {
+        char *end = find_ascii_case_insensitive(start, "</think>");
+
+        if (end == NULL) {
+            *start = '\0';
+            break;
+        }
+        end += strlen("</think>");
+        memmove(start, end, strlen(end) + 1);
+    }
+}
+
 void bot_vector_free(bot_vector_t *vector)
 {
     free(vector->values);
@@ -239,7 +282,13 @@ int bot_ollama_chat(const bot_config_t *config,
         set_error(error, error_size, "解析聊天回复失败");
         goto out;
     }
+    strip_think_blocks(answer->data);
     bot_sanitize_line(answer->data);
+    if ((answer->data == NULL || answer->data[0] == '\0') &&
+        bot_str_append(answer, "（模型没有返回可显示内容）") != 0) {
+        set_error(error, error_size, "保存聊天回复失败");
+        goto out;
+    }
     answer->len = strlen(answer->data);
     rc = 0;
 

@@ -193,10 +193,20 @@ int bot_screen_chat_ready(const bot_screen_t *screen)
     return strstr(row2, "大厅") != NULL || strstr(row_input, "输入消息") != NULL;
 }
 
-static int parse_chat_line(const char *line, bot_chat_message_t *message)
+int bot_screen_private_chat_active(const bot_screen_t *screen)
+{
+    char row2[BOT_SCREEN_COLS * 8];
+
+    clean_box_line(screen->rows[2], row2, sizeof(row2));
+    return strstr(row2, "大厅") != NULL &&
+           strstr(row2, "[大厅]") == NULL &&
+           strstr(row2, "[*大厅]") == NULL;
+}
+
+static int parse_chat_line(const char *line, int private_chat, bot_chat_message_t *message)
 {
     char work[BOT_MAX_MESSAGE_TEXT];
-    char fp_source[BOT_MAX_MESSAGE_TEXT];
+    char fp_source[BOT_MAX_MESSAGE_TEXT + 16];
     char *right_bracket;
     char *rest;
     char *sep;
@@ -206,7 +216,7 @@ static int parse_chat_line(const char *line, bot_chat_message_t *message)
     if (work[0] == '\0' || work[0] != '[') {
         return 0;
     }
-    bot_copy_string(fp_source, sizeof(fp_source), work);
+    snprintf(fp_source, sizeof(fp_source), "%s\t%s", private_chat ? "private" : "lobby", work);
     right_bracket = strstr(work, "] ");
     if (right_bracket == NULL) {
         return 0;
@@ -241,12 +251,14 @@ size_t bot_screen_extract_messages(const bot_screen_t *screen,
     size_t count = 0;
     int row;
     int chat_last = BOT_SCREEN_ROWS - 3;
+    int private_chat = bot_screen_private_chat_active(screen);
 
     for (row = 3; row <= chat_last && count < max_messages; row++) {
         char line[BOT_SCREEN_COLS * 8];
 
         clean_box_line(screen->rows[row], line, sizeof(line));
-        if (parse_chat_line(line, &messages[count])) {
+        if (parse_chat_line(line, private_chat, &messages[count])) {
+            messages[count].private_chat = private_chat;
             count++;
         }
     }
