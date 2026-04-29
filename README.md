@@ -40,6 +40,8 @@ $EDITOR .env
 docker compose up -d --build
 ```
 
+Docker volumes 使用固定名称 `tenet_data`、`tenet_home`、`tenet_run`；如果本机已有旧的 `tenet_tenet_*` volume，Docker 不会自动重命名，需要手动迁移后再删除旧 volume。
+
 连接聊天室：
 
 ```sh

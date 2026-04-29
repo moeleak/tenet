@@ -85,5 +85,8 @@ services:
 
 volumes:
   tenet_data:
+    name: tenet_data
   tenet_home:
+    name: tenet_home
   tenet_run:
+    name: tenet_run

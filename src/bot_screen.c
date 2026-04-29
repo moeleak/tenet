@@ -35,17 +35,32 @@ static void screen_clear(bot_screen_t *screen)
 
 static void row_append(bot_screen_t *screen, unsigned char byte)
 {
+    char *row;
     size_t len;
+    size_t index;
+    size_t cap;
 
     if (screen->cursor_row < 1 || screen->cursor_row > BOT_SCREEN_ROWS) {
         return;
     }
+    if (screen->cursor_col < 1) {
+        screen->cursor_col = 1;
+    }
+    row = screen->rows[screen->cursor_row];
     len = screen->row_lens[screen->cursor_row];
-    if (len + 1 >= sizeof(screen->rows[screen->cursor_row])) {
+    index = (size_t)(screen->cursor_col - 1);
+    cap = sizeof(screen->rows[screen->cursor_row]);
+    if (index + 1 >= cap) {
         return;
     }
-    screen->rows[screen->cursor_row][len++] = (char)byte;
-    screen->rows[screen->cursor_row][len] = '\0';
+    while (len < index) {
+        row[len++] = ' ';
+    }
+    row[index] = (char)byte;
+    if (index >= len) {
+        len = index + 1;
+    }
+    row[len] = '\0';
     screen->row_lens[screen->cursor_row] = len;
     screen->cursor_col++;
 }
@@ -173,7 +188,22 @@ static void clean_box_line(const char *row, char *out, size_t size)
     bot_copy_string(out, size, row);
     bot_trim(out);
     if (out[0] == '|') {
+        char *cursor;
+
         memmove(out, out + 1, strlen(out));
+        cursor = out;
+        while ((cursor = strstr(cursor, " |")) != NULL) {
+            char *after = cursor + 2;
+
+            while (*after == ' ') {
+                after++;
+            }
+            if (*after == '\0' || *after == '|' || *after == '+') {
+                *cursor = '\0';
+                break;
+            }
+            cursor += 2;
+        }
     }
     bot_trim(out);
     len = strlen(out);
