@@ -31,6 +31,7 @@
 #define TENET_SESSION_HELLO_V1 "TENET/1"
 #define TENET_SESSION_HELLO_V2 "TENET/2"
 #define TENET_SESSION_HELLO_V3 "TENET/3"
+#define TENET_BOT_HELLO_V1 "TENET/BOT/1"
 #define TENET_CONTROL_BYTE 0x1d
 
 #define TELNET_IAC 255
@@ -90,6 +91,7 @@ struct client {
     int active;
     int skip_cr_tail;
     int in_chat;
+    int bot_protocol;
     char username[TENET_MAX_USERNAME];
     char display_name[TENET_MAX_DISPLAY_NAME];
     char input_line[TENET_MAX_LINE];

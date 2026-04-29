@@ -8,6 +8,7 @@ static void refresh_client_input(server_state_t *state, client_t *client);
 static void compute_layout(const client_t *client, ui_layout_t *layout);
 static const char *client_name(const client_t *client);
 static client_t *find_client_by_username_locked(server_state_t *state, const char *username);
+static int send_private_message_to(server_state_t *state, client_t *sender, const char *target_username, const char *message);
 static int clamp_int(int value, int min_value, int max_value);
 static int read_control_sequence(client_t *client);
 static size_t utf8_prefix_for_width(const char *text, int max_width, int *used_width);
@@ -2293,7 +2294,7 @@ static void refresh_all_clients_locked(server_state_t *state)
     client_t *cursor;
 
     for (cursor = state->clients; cursor != NULL; cursor = cursor->next) {
-        if (cursor->active && cursor->in_chat) {
+        if (cursor->active && cursor->in_chat && !cursor->bot_protocol) {
             refresh_client_screen_locked(state, cursor);
         }
     }
@@ -2304,7 +2305,8 @@ static void mark_lobby_unread_locked(server_state_t *state)
     client_t *cursor;
 
     for (cursor = state->clients; cursor != NULL; cursor = cursor->next) {
-        if (cursor->active && cursor->in_chat && cursor->active_peer_username[0] != '\0') {
+        if (cursor->active && cursor->in_chat && !cursor->bot_protocol &&
+            cursor->active_peer_username[0] != '\0') {
             cursor->lobby_unread = 1;
         }
     }
@@ -2726,7 +2728,7 @@ static int show_entry_screen(client_t *client)
 static void send_help(server_state_t *state, client_t *client)
 {
     append_system_message_for_client(state, client,
-                                     "命令: /help 帮助 · /who 在线用户 · /pm 用户名 私聊 · /close 关闭私聊 · /me 动作 · /quit 退出；可点击在线用户私聊");
+                                     "命令: /help 帮助 · /who 在线用户 · /pm 用户ID 打开私聊 · /msg 用户ID 内容 发送私聊 · /close 关闭私聊 · /me 动作 · /quit 退出；可点击在线用户私聊");
 }
 
 static void add_multiline_message_locked(server_state_t *state,
@@ -2799,7 +2801,7 @@ static void add_private_multiline_message_locked(server_state_t *state,
 
         if (first) {
             snprintf(line, sizeof(line), ANSI_DIM "[%s]" ANSI_RESET " " ANSI_MAGENTA "%s" ANSI_RESET ": %s",
-                     timebuf, client_name(sender), part);
+                     timebuf, sender->username, part);
         } else {
             snprintf(line, sizeof(line), ANSI_DIM "      │" ANSI_RESET " %s", part);
         }
@@ -2826,6 +2828,80 @@ static client_t *find_client_by_username_locked(server_state_t *state, const cha
     return NULL;
 }
 
+static int bot_protocol_append_text(char *buffer, size_t size, size_t *used, const char *text)
+{
+    size_t len = strlen(text != NULL ? text : "");
+
+    if (*used + len >= size) {
+        return -1;
+    }
+    memcpy(buffer + *used, text != NULL ? text : "", len);
+    *used += len;
+    buffer[*used] = '\0';
+    return 0;
+}
+
+static int bot_protocol_append_escaped(char *buffer, size_t size, size_t *used, const char *text)
+{
+    const unsigned char *cursor = (const unsigned char *)(text != NULL ? text : "");
+
+    while (*cursor != '\0') {
+        char escaped[3];
+        const char *part = NULL;
+        size_t len = 1;
+        unsigned char ch = *cursor++;
+
+        switch (ch) {
+        case '\\': part = "\\\\"; len = 2; break;
+        case '\t': part = "\\t"; len = 2; break;
+        case '\n': part = "\\n"; len = 2; break;
+        case '\r': part = "\\r"; len = 2; break;
+        default:
+            if ((ch < 0x20 && ch != '\t') || ch == 0x7f) {
+                escaped[0] = ' ';
+            } else {
+                escaped[0] = (char)ch;
+            }
+            escaped[1] = '\0';
+            part = escaped;
+            len = 1;
+            break;
+        }
+        if (*used + len >= size) {
+            return -1;
+        }
+        memcpy(buffer + *used, part, len);
+        *used += len;
+        buffer[*used] = '\0';
+    }
+    return 0;
+}
+
+static void send_bot_event_locked(client_t *client,
+                                  const char *type,
+                                  const char *sender_username,
+                                  const char *sender_display,
+                                  const char *message)
+{
+    char line[TENET_MAX_LINE * 2 + TENET_MAX_DISPLAY_NAME + TENET_MAX_USERNAME + 64];
+    size_t used = 0;
+
+    if (!client->bot_protocol) {
+        return;
+    }
+    if (bot_protocol_append_text(line, sizeof(line), &used, type) != 0 ||
+        bot_protocol_append_text(line, sizeof(line), &used, "\t") != 0 ||
+        bot_protocol_append_escaped(line, sizeof(line), &used, sender_username) != 0 ||
+        bot_protocol_append_text(line, sizeof(line), &used, "\t") != 0 ||
+        bot_protocol_append_escaped(line, sizeof(line), &used, sender_display) != 0 ||
+        bot_protocol_append_text(line, sizeof(line), &used, "\t") != 0 ||
+        bot_protocol_append_escaped(line, sizeof(line), &used, message) != 0 ||
+        bot_protocol_append_text(line, sizeof(line), &used, "\n") != 0) {
+        return;
+    }
+    (void)send_text(client, line);
+}
+
 static void broadcast_message(server_state_t *state,
                               client_t *sender,
                               const char *kind,
@@ -2834,63 +2910,109 @@ static void broadcast_message(server_state_t *state,
 {
     char timebuf[16];
     char line[TENET_HISTORY_LINE];
+    client_t *cursor;
+    int notify_bots = 0;
 
     now_string(timebuf, sizeof(timebuf));
     pthread_mutex_lock(&state->mutex);
     (void)include_sender;
     if (sender != NULL && strcmp(kind, "chat") == 0) {
         add_multiline_message_locked(state, timebuf, client_name(sender), message, 0);
+        notify_bots = 1;
     } else if (sender != NULL && strcmp(kind, "me") == 0) {
         add_multiline_message_locked(state, timebuf, client_name(sender), message, 1);
+        notify_bots = 1;
     } else {
         snprintf(line, sizeof(line), ANSI_DIM "[%s]" ANSI_RESET " " ANSI_YELLOW "SYSTEM:" ANSI_RESET " %s",
                  timebuf, message);
         history_add_locked(state, line, NULL);
+    }
+    if (notify_bots) {
+        for (cursor = state->clients; cursor != NULL; cursor = cursor->next) {
+            if (cursor->active && cursor->in_chat && cursor->bot_protocol && cursor != sender) {
+                send_bot_event_locked(cursor, "MSG", sender->username, client_name(sender), message);
+            }
+        }
     }
     mark_lobby_unread_locked(state);
     refresh_all_clients_locked(state);
     pthread_mutex_unlock(&state->mutex);
 }
 
-static void send_private_message(server_state_t *state, client_t *sender, const char *message)
+static int send_private_message_to(server_state_t *state,
+                                   client_t *sender,
+                                   const char *target_username,
+                                   const char *message)
 {
     char timebuf[16];
     client_t *recipient;
 
-    if (sender->active_peer_username[0] == '\0') {
-        append_system_message_for_client(state, sender, ANSI_RED "请先使用 /pm 用户名 打开私聊。" ANSI_RESET);
-        return;
+    if (target_username == NULL || target_username[0] == '\0') {
+        if (!sender->bot_protocol) {
+            append_system_message_for_client(state, sender, ANSI_RED "请指定私聊用户ID。" ANSI_RESET);
+        }
+        return -1;
+    }
+    if (ascii_equal_ignore_case(target_username, sender->username)) {
+        if (!sender->bot_protocol) {
+            append_system_message_for_client(state, sender, ANSI_RED "不能和自己私聊。" ANSI_RESET);
+        }
+        return -1;
     }
 
     now_string(timebuf, sizeof(timebuf));
     pthread_mutex_lock(&state->mutex);
-    recipient = find_client_by_username_locked(state, sender->active_peer_username);
+    recipient = find_client_by_username_locked(state, target_username);
     if (recipient == NULL) {
-        append_system_message_for_client_locked(state, sender, ANSI_RED "对方不在线，无法发送私聊。" ANSI_RESET);
-        refresh_client_screen_locked(state, sender);
+        if (!sender->bot_protocol) {
+            append_system_message_for_client_locked(state, sender, ANSI_RED "用户不在线，无法发送私聊。" ANSI_RESET);
+            refresh_client_screen_locked(state, sender);
+        }
         pthread_mutex_unlock(&state->mutex);
-        return;
+        return -1;
     }
 
-    (void)add_private_peer(sender, recipient->username);
-    (void)add_private_peer(recipient, sender->username);
-    if (username_in_list(state->config->internal_users, recipient->username)) {
-        (void)switch_to_private_peer(recipient, sender->username);
-        snprintf(recipient->status_line, sizeof(recipient->status_line),
-                 "正在和 %s 私聊。", client_name(sender));
+    if (!sender->bot_protocol) {
+        int peer_index;
+
+        (void)add_private_peer(sender, recipient->username);
+        peer_index = private_peer_index(sender, recipient->username);
+        if (peer_index >= 0) {
+            sender->private_peer_unread[peer_index] = 0;
+        }
+    }
+    if (!recipient->bot_protocol) {
+        (void)add_private_peer(recipient, sender->username);
     }
     add_private_multiline_message_locked(state, timebuf, sender, recipient, message);
-    sender->history_scroll_rows = 0;
-    mark_private_unread(sender, recipient->username);
-    mark_private_unread(recipient, sender->username);
-    if (history_entry_matches_active_private(&state->history[(state->history_next + TENET_HISTORY_CAP - 1) % TENET_HISTORY_CAP], recipient)) {
-        recipient->history_scroll_rows = 0;
+    if (!sender->bot_protocol) {
+        sender->history_scroll_rows = 0;
     }
-    refresh_client_screen_locked(state, sender);
-    if (recipient != sender) {
+    if (!recipient->bot_protocol) {
+        mark_private_unread(recipient, sender->username);
+        if (history_entry_matches_active_private(&state->history[(state->history_next + TENET_HISTORY_CAP - 1) % TENET_HISTORY_CAP], recipient)) {
+            recipient->history_scroll_rows = 0;
+        }
+    } else if (recipient != sender) {
+        send_bot_event_locked(recipient, "PM", sender->username, client_name(sender), message);
+    }
+    if (!sender->bot_protocol) {
+        refresh_client_screen_locked(state, sender);
+    }
+    if (recipient != sender && !recipient->bot_protocol) {
         refresh_client_screen_locked(state, recipient);
     }
     pthread_mutex_unlock(&state->mutex);
+    return 0;
+}
+
+static void send_private_message(server_state_t *state, client_t *sender, const char *message)
+{
+    if (sender->active_peer_username[0] == '\0') {
+        append_system_message_for_client(state, sender, ANSI_RED "请先使用 /pm 用户ID 打开私聊。" ANSI_RESET);
+        return;
+    }
+    (void)send_private_message_to(state, sender, sender->active_peer_username, message);
 }
 
 static void send_who(server_state_t *state, client_t *client)
@@ -2936,20 +3058,20 @@ static void handle_command(server_state_t *state, client_t *client, char *line, 
     } else if (strcmp(line, "/who") == 0) {
         send_who(state, client);
     } else if (strncmp(line, "/pm ", 4) == 0) {
-        char *username = line + 4;
+        char *name = line + 4;
         client_t *recipient;
 
-        trim_line(username);
-        if (!valid_username(username)) {
-            append_system_message_for_client(state, client, ANSI_RED "用法: /pm 用户名" ANSI_RESET);
+        trim_line(name);
+        if (!valid_username(name)) {
+            append_system_message_for_client(state, client, ANSI_RED "用法: /pm 用户ID" ANSI_RESET);
             return;
         }
-        if (ascii_equal_ignore_case(username, client->username)) {
+        if (ascii_equal_ignore_case(name, client->username)) {
             append_system_message_for_client(state, client, ANSI_RED "不能和自己私聊。" ANSI_RESET);
             return;
         }
         pthread_mutex_lock(&state->mutex);
-        recipient = find_client_by_username_locked(state, username);
+        recipient = find_client_by_username_locked(state, name);
         if (recipient == NULL) {
             append_system_message_for_client_locked(state, client, ANSI_RED "用户不在线。" ANSI_RESET);
             refresh_client_screen_locked(state, client);
@@ -2963,6 +3085,29 @@ static void handle_command(server_state_t *state, client_t *client, char *line, 
         }
         refresh_client_screen_locked(state, client);
         pthread_mutex_unlock(&state->mutex);
+    } else if (strncmp(line, "/msg ", 5) == 0) {
+        char *name = line + 5;
+        char *message;
+
+        while (isspace((unsigned char)*name)) {
+            name++;
+        }
+        message = name;
+        while (*message != '\0' && !isspace((unsigned char)*message)) {
+            message++;
+        }
+        if (*message != '\0') {
+            *message++ = '\0';
+        }
+        trim_line(message);
+        if (!valid_username(name) || message[0] == '\0') {
+            append_system_message_for_client(state, client, ANSI_RED "用法: /msg 用户ID 内容" ANSI_RESET);
+            return;
+        }
+        if (send_private_message_to(state, client, name, message) == 0 &&
+            client->active_peer_username[0] == '\0') {
+            append_system_message_for_client(state, client, ANSI_DIM "已发送私聊。" ANSI_RESET);
+        }
     } else if (strcmp(line, "/close") == 0) {
         if (client->active_peer_username[0] == '\0') {
             append_system_message_for_client(state, client, ANSI_RED "大厅不能关闭。" ANSI_RESET);
@@ -2990,6 +3135,88 @@ static void handle_command(server_state_t *state, client_t *client, char *line, 
     }
 }
 
+static int bot_protocol_unescape_field(const char *text, char *out, size_t size)
+{
+    size_t used = 0;
+
+    if (size == 0) {
+        return -1;
+    }
+    while (*text != '\0') {
+        unsigned char ch = (unsigned char)*text++;
+
+        if (ch == '\\') {
+            ch = (unsigned char)*text++;
+            switch (ch) {
+            case '\\': ch = '\\'; break;
+            case 't': ch = '\t'; break;
+            case 'n': ch = '\n'; break;
+            case 'r': ch = '\r'; break;
+            default: return -1;
+            }
+        }
+        if (used + 1 >= size) {
+            return -1;
+        }
+        out[used++] = (char)ch;
+    }
+    out[used] = '\0';
+    return 0;
+}
+
+static int handle_bot_protocol_command(server_state_t *state, client_t *client, char *line)
+{
+    char text[TENET_MAX_LINE];
+
+    if (strcmp(line, "QUIT") == 0) {
+        return 1;
+    }
+    if (strncmp(line, "CHAT\t", 5) == 0) {
+        if (bot_protocol_unescape_field(line + 5, text, sizeof(text)) != 0) {
+            return 0;
+        }
+        trim_line(text);
+        if (text[0] != '\0') {
+            broadcast_message(state, client, "chat", text, 1);
+        }
+        return 0;
+    }
+    if (strncmp(line, "PM\t", 3) == 0) {
+        char *target = line + 3;
+        char *message = strchr(target, '\t');
+
+        if (message == NULL) {
+            return 0;
+        }
+        *message++ = '\0';
+        if (!valid_username(target) ||
+            bot_protocol_unescape_field(message, text, sizeof(text)) != 0) {
+            return 0;
+        }
+        trim_line(text);
+        if (text[0] != '\0') {
+            (void)send_private_message_to(state, client, target, text);
+        }
+    }
+    return 0;
+}
+
+static void handle_bot_client(server_state_t *state, client_t *client)
+{
+    char line[TENET_MAX_LINE * 2 + TENET_MAX_USERNAME + 32];
+
+    while (!stop_requested) {
+        int rc = read_plain_line_fd(client->fd, line, sizeof(line));
+
+        if (rc <= 0) {
+            break;
+        }
+        if (handle_bot_protocol_command(state, client, line)) {
+            break;
+        }
+    }
+}
+
 static void *client_thread(void *arg)
 {
     client_t *client = arg;
@@ -3014,8 +3241,48 @@ static void *client_thread(void *arg)
         char display_name[TENET_MAX_DISPLAY_NAME];
         int protocol_version;
 
-        if (read_plain_line_fd(client->fd, hello, sizeof(hello)) <= 0 ||
-            (strcmp(hello, TENET_SESSION_HELLO_V1) != 0 &&
+        if (read_plain_line_fd(client->fd, hello, sizeof(hello)) <= 0) {
+            close(client->fd);
+            destroy_client(client);
+            return NULL;
+        }
+        if (strcmp(hello, TENET_BOT_HELLO_V1) == 0) {
+            if (read_plain_line_fd(client->fd, ssh_user, sizeof(ssh_user)) <= 0 ||
+                read_plain_line_fd(client->fd, display_name, sizeof(display_name)) <= 0 ||
+                !valid_username(ssh_user)) {
+                close(client->fd);
+                destroy_client(client);
+                return NULL;
+            }
+            trim_line(display_name);
+            if (!username_in_list(state->config->internal_users, ssh_user)) {
+                (void)send_text(client, "ERR\tunauthorized bot user\n");
+                close(client->fd);
+                destroy_client(client);
+                return NULL;
+            }
+            safe_copy(client->username, sizeof(client->username), ssh_user);
+            safe_copy(client->display_name, sizeof(client->display_name),
+                      valid_display_name(display_name) ? display_name : client->username);
+            client->bot_protocol = 1;
+            client->in_chat = 1;
+            if (add_client_if_username_free(state, client) != 0) {
+                (void)send_text(client, "ERR\tduplicate username\n");
+                close(client->fd);
+                destroy_client(client);
+                return NULL;
+            }
+            snprintf(notice, sizeof(notice), "%s 加入了聊天室。", client_name(client));
+            broadcast_message(state, NULL, "system", notice, 0);
+            handle_bot_client(state, client);
+            snprintf(notice, sizeof(notice), "%s 离开了聊天室。", client_name(client));
+            remove_client(state, client);
+            broadcast_message(state, NULL, "system", notice, 1);
+            close(client->fd);
+            destroy_client(client);
+            return NULL;
+        }
+        if ((strcmp(hello, TENET_SESSION_HELLO_V1) != 0 &&
              strcmp(hello, TENET_SESSION_HELLO_V2) != 0 &&
              strcmp(hello, TENET_SESSION_HELLO_V3) != 0) ||
             read_plain_line_fd(client->fd, ssh_user, sizeof(ssh_user)) <= 0 ||

@@ -179,7 +179,8 @@ TENET_SOCKET=/run/tenet.sock ./tenet --ssh-backend
 ```text
 /help        显示帮助
 /who         查看在线用户
-/pm USER     打开和 USER 的私聊，用户名支持 Tab 补全，也可点击在线用户
+/pm USER     按用户 ID 打开私聊，支持 Tab 补全，也可点击在线用户
+/msg USER TEXT  按用户 ID 发送一次私聊，不切换当前聊天
 /close       关闭当前私聊标签；大厅不能关闭
 /me TEXT     发送动作消息
 /quit        退出聊天室
@@ -230,7 +231,7 @@ make tenet-bot
 ```sh
 ollama pull qwen3.5:9b
 ollama pull qwen3-embedding:4b
-./tenet --ssh-backend --socket /tmp/tenet.sock
+TENET_INTERNAL_USERS=tenet-bot ./tenet --ssh-backend --socket /tmp/tenet.sock
 ./tenet-bot --socket /tmp/tenet.sock
 ```
 
@@ -253,5 +254,7 @@ cp .env.example .env
 $EDITOR .env
 docker compose up -d --build
 ```
+
+`tenet-bot` 通过结构化 Unix socket 协议接收消息，不读取终端屏幕或 ANSI UI；私聊事件只会触发私聊回复，不会同步到大厅。
 
 `tenet-bot` 会把每次问答写入 SQLite，同时写入全局记忆和该用户记忆；后续请求会先用 `/api/embed` 做向量检索，再把相关记忆、摘要和最近上下文放进 `/api/chat` 的 prompt。

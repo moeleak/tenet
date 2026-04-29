@@ -2,10 +2,8 @@
 #include "bot_memory.h"
 #include "bot_ollama.h"
 #include "bot_protocol.h"
-#include "bot_screen.h"
 #include "bot_util.h"
 
-#include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,7 +89,19 @@ static int append_prompt_context(const bot_config_t *config,
     return 0;
 }
 
-static int send_reply_chunks(int fd, const char *prefix, const char *answer)
+static int send_reply_line(int fd, int private_chat, const char *target_username, const char *line)
+{
+    if (private_chat) {
+        return bot_protocol_send_private(fd, target_username, line);
+    }
+    return bot_protocol_send_chat(fd, line);
+}
+
+static int send_reply_chunks(int fd,
+                             const char *prefix,
+                             const char *answer,
+                             int private_chat,
+                             const char *target_username)
 {
     size_t prefix_len = strlen(prefix);
     size_t answer_len = strlen(answer);
@@ -99,7 +109,7 @@ static int send_reply_chunks(int fd, const char *prefix, const char *answer)
     int chunk_index = 0;
 
     if (answer_len == 0) {
-        return bot_protocol_send_message(fd, prefix);
+        return send_reply_line(fd, private_chat, target_username, prefix);
     }
     while (pos < answer_len) {
         size_t limit = BOT_REPLY_CHUNK;
@@ -140,7 +150,7 @@ static int send_reply_chunks(int fd, const char *prefix, const char *answer)
         }
         if (rc == 0) {
             bot_sanitize_line(line.data);
-            rc = bot_protocol_send_message(fd, line.data);
+            rc = send_reply_line(fd, private_chat, target_username, line.data);
         }
         bot_str_free(&line);
         if (rc != 0) {
@@ -258,7 +268,7 @@ out:
 static void answer_message(const bot_config_t *config,
                            bot_memory_t *memory,
                            int fd,
-                           const bot_chat_message_t *message)
+                           const bot_event_t *message)
 {
     char question[BOT_MAX_MESSAGE_TEXT];
     char prefix[BOT_MAX_SENDER + 8];
@@ -300,25 +310,22 @@ static void answer_message(const bot_config_t *config,
     if (append_prompt_context(config, memory, message->sender, question,
                               query_vector_json.len > 0 ? query_vector_json.data : NULL,
                               &prompt) != 0) {
-        (void)bot_protocol_send_message(fd, "tenet-bot 内部错误：构造 prompt 失败。");
+        char line[256];
+
+        snprintf(line, sizeof(line), "%stenet-bot 内部错误：构造 prompt 失败。", prefix);
+        (void)send_reply_line(fd, message->private_chat, message->sender, line);
         goto out;
     }
     if (bot_ollama_chat(config, system_prompt, prompt.data, &answer, error, sizeof(error)) != 0) {
         char line[768];
-        if (message->private_chat) {
-            snprintf(line, sizeof(line), "Ollama 调用失败：%.650s", error);
-        } else {
-            snprintf(line, sizeof(line), "@%.200s Ollama 调用失败：%.500s", message->sender, error);
-        }
-        (void)bot_protocol_send_message(fd, line);
+
+        snprintf(line, sizeof(line), "%sOllama 调用失败：%.650s", prefix, error);
+        (void)send_reply_line(fd, message->private_chat, message->sender, line);
         goto out;
     }
-    if (send_reply_chunks(fd, prefix, answer.data) != 0) {
+    if (send_reply_chunks(fd, prefix, answer.data, message->private_chat, message->sender) != 0) {
         fprintf(stderr, "tenet-bot: 发送回复失败\n");
         goto out;
-    }
-    if (message->private_chat) {
-        (void)bot_protocol_send_message(fd, "/close");
     }
     remember_exchange(config, memory, message->sender, question, answer.data);
 
@@ -329,53 +336,27 @@ out:
     bot_str_free(&answer);
 }
 
-static void handle_screen_messages(const bot_config_t *config,
-                                   bot_memory_t *memory,
-                                   int fd,
-                                   bot_screen_t *screen,
-                                   int *primed)
+static void handle_event(const bot_config_t *config,
+                         bot_memory_t *memory,
+                         int fd,
+                         const bot_event_t *event)
 {
-    bot_chat_message_t messages[BOT_MAX_CHAT_MESSAGES];
-    size_t count;
-    size_t i;
-
-    if (!bot_screen_chat_ready(screen)) {
+    if (sender_is_bot(config, event->sender) || sender_is_bot(config, event->sender_display)) {
         return;
     }
-    count = bot_screen_extract_messages(screen, messages, BOT_MAX_CHAT_MESSAGES);
-    if (!*primed) {
-        for (i = 0; i < count; i++) {
-            (void)bot_memory_mark_seen(memory, messages[i].fingerprint);
-        }
-        *primed = 1;
-        fprintf(stderr, "tenet-bot: 已进入聊天室，等待 @%s 或私聊\n", config->username);
+    if (!event->private_chat && !message_mentions_bot(config, event->text)) {
         return;
     }
-    for (i = 0; i < count; i++) {
-        if (bot_memory_is_seen(memory, messages[i].fingerprint)) {
-            continue;
-        }
-        (void)bot_memory_mark_seen(memory, messages[i].fingerprint);
-        if (sender_is_bot(config, messages[i].sender)) {
-            continue;
-        }
-        if (!messages[i].private_chat && !message_mentions_bot(config, messages[i].text)) {
-            continue;
-        }
-        answer_message(config, memory, fd, &messages[i]);
-    }
+    answer_message(config, memory, fd, event);
 }
 
 int main(int argc, char **argv)
 {
     bot_config_t config;
     bot_memory_t memory;
-    bot_screen_t screen;
     char error[512];
-    char buffer[8192];
     int fd;
     int parse_rc;
-    int primed = 0;
 
     bot_config_defaults(&config);
     parse_rc = bot_config_parse(&config, argc, argv);
@@ -397,29 +378,27 @@ int main(int argc, char **argv)
         bot_memory_close(&memory);
         return 1;
     }
-    if (bot_protocol_send_hello(fd, &config) != 0 || bot_protocol_send_enter(fd) != 0) {
-        fprintf(stderr, "tenet-bot: 发送 tenet 握手失败\n");
+    if (bot_protocol_send_hello(fd, &config) != 0) {
+        fprintf(stderr, "tenet-bot: 发送 bot 协议握手失败\n");
         close(fd);
         bot_memory_close(&memory);
         return 1;
     }
 
-    bot_screen_init(&screen);
+    fprintf(stderr, "tenet-bot: 已连接，使用结构化 bot 协议，等待 @%s 或私聊\n", config.username);
     for (;;) {
-        ssize_t got = read(fd, buffer, sizeof(buffer));
-        if (got < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
-            fprintf(stderr, "tenet-bot: 读取 tenet 后端失败: %s\n", strerror(errno));
+        bot_event_t event;
+        int rc = bot_protocol_read_event(fd, &event, error, sizeof(error));
+
+        if (rc < 0) {
+            fprintf(stderr, "tenet-bot: %s\n", error);
             break;
         }
-        if (got == 0) {
+        if (rc == 0) {
             fprintf(stderr, "tenet-bot: tenet 后端已断开\n");
             break;
         }
-        bot_screen_feed(&screen, buffer, (size_t)got);
-        handle_screen_messages(&config, &memory, fd, &screen, &primed);
+        handle_event(&config, &memory, fd, &event);
     }
 
     close(fd);
