@@ -196,16 +196,17 @@ int bot_screen_chat_ready(const bot_screen_t *screen)
 static int parse_chat_line(const char *line, bot_chat_message_t *message)
 {
     char work[BOT_MAX_MESSAGE_TEXT];
+    char fp_source[BOT_MAX_MESSAGE_TEXT];
     char *right_bracket;
     char *rest;
     char *sep;
-    char fp_source[BOT_MAX_MESSAGE_TEXT + BOT_MAX_SENDER + 32];
 
     bot_copy_string(work, sizeof(work), line);
     bot_trim(work);
     if (work[0] == '\0' || work[0] != '[') {
         return 0;
     }
+    bot_copy_string(fp_source, sizeof(fp_source), work);
     right_bracket = strstr(work, "] ");
     if (right_bracket == NULL) {
         return 0;
@@ -229,7 +230,6 @@ static int parse_chat_line(const char *line, bot_chat_message_t *message)
     bot_copy_string(message->text, sizeof(message->text), sep + 2);
     bot_sanitize_line(message->sender);
     bot_sanitize_line(message->text);
-    snprintf(fp_source, sizeof(fp_source), "%s\t%s", message->sender, message->text);
     bot_hash_hex(fp_source, message->fingerprint);
     return 1;
 }

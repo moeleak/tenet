@@ -56,6 +56,39 @@ static int client_is_registration_gateway(const client_t *client)
     return ascii_equal_ignore_case(client->username, registration_gateway_username());
 }
 
+static int username_in_list(const char *list, const char *username)
+{
+    const char *cursor = list;
+
+    if (list == NULL || username == NULL || username[0] == '\0') {
+        return 0;
+    }
+    while (*cursor != '\0') {
+        char token[TENET_MAX_USERNAME];
+        size_t len = 0;
+
+        while (*cursor != '\0' && (isspace((unsigned char)*cursor) || *cursor == ',')) {
+            cursor++;
+        }
+        while (*cursor != '\0' && !isspace((unsigned char)*cursor) && *cursor != ',') {
+            if (len + 1 < sizeof(token)) {
+                token[len++] = *cursor;
+            }
+            cursor++;
+        }
+        token[len] = '\0';
+        if (token[0] != '\0' && ascii_equal_ignore_case(token, username)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static int client_is_internal_user(server_state_t *state, const client_t *client)
+{
+    return username_in_list(state->config->internal_users, client->username);
+}
+
 static int authenticate_registered_user(server_state_t *state,
                                         client_t *client,
                                         const tenet_local_user_record_t *record)
@@ -266,6 +299,9 @@ int authenticate_ssh_client(server_state_t *state, client_t *client)
 
     display_name[0] = '\0';
     error[0] = '\0';
+    if (client_is_internal_user(state, client)) {
+        return 0;
+    }
     lookup_rc = tenet_ldap_lookup_user(state->config, client->username,
                                        display_name, sizeof(display_name),
                                        error, sizeof(error));

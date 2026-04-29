@@ -47,6 +47,7 @@ void tenet_config_defaults(tenet_config_t *config)
     config->transport = TENET_TRANSPORT_SSH;
     copy_string(config->socket_path, sizeof(config->socket_path), TENET_DEFAULT_SOCKET_PATH);
     copy_string(config->local_user_db_path, sizeof(config->local_user_db_path), TENET_DEFAULT_LOCAL_USER_DB);
+    config->internal_users[0] = '\0';
     config->sync_local_ssh_users = 0;
 
     config->ldap_enabled = 1;
@@ -80,6 +81,10 @@ static void apply_env(tenet_config_t *config)
     value = getenv("TENET_LOCAL_USER_DB");
     if (value != NULL && *value != '\0') {
         copy_string(config->local_user_db_path, sizeof(config->local_user_db_path), value);
+    }
+    value = getenv("TENET_INTERNAL_USERS");
+    if (value != NULL && *value != '\0') {
+        copy_string(config->internal_users, sizeof(config->internal_users), value);
     }
     if (env_truthy(getenv("TENET_SYNC_LOCAL_SSH_USERS"))) {
         config->sync_local_ssh_users = 1;
@@ -140,6 +145,7 @@ static void usage(FILE *stream)
             "  --ldap-bind-dn DN        搜索模式的 LDAP 绑定 DN\n"
             "  --ldap-bind-password PW  搜索模式的 LDAP 绑定密码\n"
             "  --local-user-db PATH     tenet 聊天账号库，默认 tenet-users.db\n"
+            "  --internal-users LIST    允许从 Unix socket 直连的内部服务用户列表\n"
             "  --sync-local-ssh-users   注册时同步创建同名 SSH 本地用户\n"
             "  -h, --help               显示帮助\n\n"
             "环境变量同名可用，例如 TENET_SOCKET、TENET_PORT、TENET_LDAP_HOST。\n");
@@ -217,6 +223,9 @@ static int parse_args(int argc, char **argv, tenet_config_t *config, int *run_se
         } else if (strcmp(argv[index], "--local-user-db") == 0) {
             if (need_arg(argc, argv, index) != 0) return -1;
             copy_string(config->local_user_db_path, sizeof(config->local_user_db_path), argv[++index]);
+        } else if (strcmp(argv[index], "--internal-users") == 0) {
+            if (need_arg(argc, argv, index) != 0) return -1;
+            copy_string(config->internal_users, sizeof(config->internal_users), argv[++index]);
         } else if (strcmp(argv[index], "--sync-local-ssh-users") == 0) {
             config->sync_local_ssh_users = 1;
         } else if (strcmp(argv[index], "-h") == 0 || strcmp(argv[index], "--help") == 0) {

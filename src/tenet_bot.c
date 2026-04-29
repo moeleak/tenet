@@ -275,6 +275,12 @@ static void answer_message(const bot_config_t *config,
     build_question(config, message->text, question, sizeof(question));
     snprintf(prefix, sizeof(prefix), "@%.200s ", message->sender);
 
+    {
+        char line[BOT_MAX_SENDER + 96];
+        snprintf(line, sizeof(line), "%s收到，正在思考...", prefix);
+        (void)bot_protocol_send_message(fd, line);
+    }
+
     query_vector.values = NULL;
     query_vector.count = 0;
     bot_str_init(&query_vector_json);

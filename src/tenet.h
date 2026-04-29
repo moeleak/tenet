@@ -40,6 +40,7 @@ typedef struct tenet_config {
     char ldap_bind_dn[TENET_MAX_DN];
     char ldap_bind_password[TENET_MAX_PASSWORD];
     char local_user_db_path[TENET_MAX_PATH];
+    char internal_users[TENET_MAX_LINE];
     int sync_local_ssh_users;
 } tenet_config_t;
 
