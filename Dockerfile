@@ -23,8 +23,9 @@ COPY --from=build /src/tenet-bot /usr/local/bin/tenet-bot
 COPY assets/badapple.delta /usr/local/share/tenet/badapple.delta
 COPY docker/entrypoint.sh /usr/local/bin/tenet-docker-entrypoint
 COPY docker/tenet-ssh-command.sh /usr/local/bin/tenet-ssh-command
+COPY docker/tenet-system-accounts.sh /usr/local/bin/tenet-system-accounts
 
-RUN chmod 0755 /usr/local/bin/tenet /usr/local/bin/tenet-bot /usr/local/bin/tenet-docker-entrypoint /usr/local/bin/tenet-ssh-command
+RUN chmod 0755 /usr/local/bin/tenet /usr/local/bin/tenet-bot /usr/local/bin/tenet-docker-entrypoint /usr/local/bin/tenet-ssh-command /usr/local/bin/tenet-system-accounts
 
 EXPOSE 2222
 ENTRYPOINT ["/usr/local/bin/tenet-docker-entrypoint"]

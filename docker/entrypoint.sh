@@ -8,9 +8,13 @@ TENET_SSH_PORT="${TENET_SSH_PORT:-2222}"
 TENET_SOCKET="${TENET_SOCKET:-/run/tenet/tenet.sock}"
 TENET_LOCAL_USER_DB="${TENET_LOCAL_USER_DB:-/var/lib/tenet/users.db}"
 TENET_SYNC_LOCAL_SSH_USERS="${TENET_SYNC_LOCAL_SSH_USERS:-1}"
+TENET_PERSIST_SYSTEM_ACCOUNTS="${TENET_PERSIST_SYSTEM_ACCOUNTS:-1}"
+TENET_SYSTEM_ACCOUNT_DIR="${TENET_SYSTEM_ACCOUNT_DIR:-/var/lib/tenet/system-accounts}"
+TENET_SYSTEM_ACCOUNT_MIN_ID="${TENET_SYSTEM_ACCOUNT_MIN_ID:-1000}"
+TENET_SYSTEM_ACCOUNT_SYNC_INTERVAL="${TENET_SYSTEM_ACCOUNT_SYNC_INTERVAL:-10}"
 TENET_BOT_USERNAME="${TENET_BOT_USERNAME:-tenet-bot}"
 TENET_INTERNAL_USERS="${TENET_INTERNAL_USERS:-$TENET_BOT_USERNAME}"
-export TENET_LOCAL_USER_DB TENET_SYNC_LOCAL_SSH_USERS TENET_BOT_USERNAME TENET_INTERNAL_USERS
+export TENET_LOCAL_USER_DB TENET_SYNC_LOCAL_SSH_USERS TENET_PERSIST_SYSTEM_ACCOUNTS TENET_SYSTEM_ACCOUNT_DIR TENET_SYSTEM_ACCOUNT_MIN_ID TENET_SYSTEM_ACCOUNT_SYNC_INTERVAL TENET_BOT_USERNAME TENET_INTERNAL_USERS
 TENET_MAX_CLIENTS="${TENET_MAX_CLIENTS:-64}"
 TENET_AUTHORIZED_KEYS="${TENET_AUTHORIZED_KEYS:-}"
 TENET_AUTHORIZED_KEYS_FILE="${TENET_AUTHORIZED_KEYS_FILE:-/etc/tenet/authorized_keys}"
@@ -72,6 +76,31 @@ bool_value() {
 
 normalize_words() {
     printf '%s' "$*" | tr '\n\t' '  ' | tr -s ' ' | sed 's/^ *//;s/ *$//'
+}
+
+system_accounts_enabled() {
+    [ "$(bool_value "$TENET_PERSIST_SYSTEM_ACCOUNTS")" = "true" ]
+}
+
+restore_system_accounts() {
+    if system_accounts_enabled; then
+        /usr/local/bin/tenet-system-accounts restore
+    fi
+}
+
+save_system_accounts() {
+    if system_accounts_enabled; then
+        if ! /usr/local/bin/tenet-system-accounts save; then
+            echo "TENET warning: failed to save local SSH account files" >&2
+        fi
+    fi
+}
+
+start_system_account_sync() {
+    if system_accounts_enabled; then
+        /usr/local/bin/tenet-system-accounts watch &
+        system_account_sync_pid=$!
+    fi
 }
 
 configure_nss_sss() {
@@ -235,8 +264,10 @@ ensure_local_gateway_users() {
 }
 
 mkdir -p /run/sshd /run/tenet /run/sssd /etc/tenet /var/lib/tenet/ssh
+restore_system_accounts
 
 sssd_pid=""
+system_account_sync_pid=""
 
 if [ "$auth_mode" = "local" ]; then
     ensure_local_user "$TENET_USER"
@@ -249,6 +280,8 @@ else
         ensure_local_gateway_users
     fi
 fi
+save_system_accounts
+start_system_account_sync
 if [ ! -f /var/lib/tenet/ssh/ssh_host_ed25519_key ]; then
     ssh-keygen -t ed25519 -N '' -f /var/lib/tenet/ssh/ssh_host_ed25519_key >/dev/null
 fi
@@ -324,6 +357,10 @@ tenet_pid=$!
 sshd_pid=$!
 
 term_handler() {
+    if [ -n "$system_account_sync_pid" ]; then
+        kill "$system_account_sync_pid" 2>/dev/null || true
+        wait "$system_account_sync_pid" 2>/dev/null || true
+    fi
     if [ -n "$sssd_pid" ]; then
         kill "$sshd_pid" "$tenet_pid" "$sssd_pid" 2>/dev/null || true
     else
@@ -334,6 +371,7 @@ term_handler() {
     if [ -n "$sssd_pid" ]; then
         wait "$sssd_pid" 2>/dev/null || true
     fi
+    save_system_accounts
 }
 trap term_handler INT TERM
 

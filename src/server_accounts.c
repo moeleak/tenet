@@ -240,6 +240,26 @@ static int run_child_command(char *const argv[], const char *input)
     return WIFEXITED(status) && WEXITSTATUS(status) == 0 ? 0 : -1;
 }
 
+static int env_value_enabled(const char *value)
+{
+    if (value == NULL || *value == '\0') {
+        return 0;
+    }
+    return strcmp(value, "1") == 0 || strcmp(value, "yes") == 0 ||
+           strcmp(value, "true") == 0 || strcmp(value, "on") == 0;
+}
+
+static void save_persistent_system_accounts(void)
+{
+    char *const save_argv[] = {"/usr/local/bin/tenet-system-accounts", "save", NULL};
+
+    if (!env_value_enabled(getenv("TENET_PERSIST_SYSTEM_ACCOUNTS")) ||
+        access(save_argv[0], X_OK) != 0) {
+        return;
+    }
+    (void)run_child_command(save_argv, NULL);
+}
+
 static int ensure_local_ssh_user(const char *username, const char *password,
                                  char *error, size_t error_size)
 {
@@ -280,6 +300,7 @@ static int ensure_local_ssh_user(const char *username, const char *password,
             return -1;
         }
     }
+    save_persistent_system_accounts();
     return 0;
 }
 

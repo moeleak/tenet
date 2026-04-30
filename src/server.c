@@ -755,24 +755,166 @@ static void input_move_right(client_t *client)
     client->input_cursor = utf8_next_start(client->input_line, client->input_cursor);
 }
 
+static int input_char_is_space(const char *text, size_t pos)
+{
+    size_t len = strlen(text);
+    unsigned int codepoint;
+
+    if (utf8_next_len(text, len, pos, &codepoint) == 0) {
+        return 0;
+    }
+    return codepoint <= UCHAR_MAX && isspace((unsigned char)codepoint);
+}
+
+static void input_move_word_left(client_t *client)
+{
+    size_t pos = clamp_cursor_to_boundary(client->input_line, client->input_cursor);
+
+    while (pos > 0) {
+        size_t previous = utf8_previous_start(client->input_line, pos);
+
+        if (!input_char_is_space(client->input_line, previous)) {
+            break;
+        }
+        pos = previous;
+    }
+    while (pos > 0) {
+        size_t previous = utf8_previous_start(client->input_line, pos);
+
+        if (input_char_is_space(client->input_line, previous)) {
+            break;
+        }
+        pos = previous;
+    }
+    client->input_cursor = pos;
+}
+
+static void input_move_word_right(client_t *client)
+{
+    size_t len = strlen(client->input_line);
+    size_t pos = clamp_cursor_to_boundary(client->input_line, client->input_cursor);
+
+    while (pos < len && input_char_is_space(client->input_line, pos)) {
+        pos = utf8_next_start(client->input_line, pos);
+    }
+    while (pos < len && !input_char_is_space(client->input_line, pos)) {
+        pos = utf8_next_start(client->input_line, pos);
+    }
+    client->input_cursor = pos;
+}
+
+static void input_delete_word_before_cursor(client_t *client, char *buffer, size_t *len)
+{
+    size_t start;
+    size_t end;
+
+    client->input_cursor = clamp_cursor_to_boundary(buffer, client->input_cursor);
+    end = client->input_cursor;
+    start = end;
+    while (start > 0) {
+        size_t previous = utf8_previous_start(buffer, start);
+
+        if (!input_char_is_space(buffer, previous)) {
+            break;
+        }
+        start = previous;
+    }
+    while (start > 0) {
+        size_t previous = utf8_previous_start(buffer, start);
+
+        if (input_char_is_space(buffer, previous)) {
+            break;
+        }
+        start = previous;
+    }
+    if (start == end) {
+        return;
+    }
+    memmove(buffer + start, buffer + end, *len - end + 1);
+    *len -= end - start;
+    client->input_cursor = start;
+    safe_copy(client->input_line, sizeof(client->input_line), buffer);
+    input_cancel_history_browse(client);
+}
+
+static void input_delete_word_at_cursor(client_t *client, char *buffer, size_t *len)
+{
+    size_t start;
+    size_t end;
+
+    client->input_cursor = clamp_cursor_to_boundary(buffer, client->input_cursor);
+    start = client->input_cursor;
+    end = start;
+    while (end < *len && input_char_is_space(buffer, end)) {
+        end = utf8_next_start(buffer, end);
+    }
+    while (end < *len && !input_char_is_space(buffer, end)) {
+        end = utf8_next_start(buffer, end);
+    }
+    if (start == end) {
+        return;
+    }
+    memmove(buffer + start, buffer + end, *len - end + 1);
+    *len -= end - start;
+    safe_copy(client->input_line, sizeof(client->input_line), buffer);
+    input_cancel_history_browse(client);
+}
+
+static void input_delete_to_line_end(client_t *client, char *buffer, size_t *len)
+{
+    buffer[client->input_cursor] = '\0';
+    *len = client->input_cursor;
+    safe_copy(client->input_line, sizeof(client->input_line), buffer);
+    input_cancel_history_browse(client);
+}
+
+static void input_delete_to_line_start(client_t *client, char *buffer, size_t *len)
+{
+    memmove(buffer, buffer + client->input_cursor, *len - client->input_cursor + 1);
+    *len -= client->input_cursor;
+    client->input_cursor = 0;
+    safe_copy(client->input_line, sizeof(client->input_line), buffer);
+    input_cancel_history_browse(client);
+}
+
 static void input_autocomplete(client_t *client, char *buffer, size_t *len, size_t size)
 {
-    const char *prefix_start = "/pm ";
-    size_t prefix_len = strlen(prefix_start);
+    const char *prefix_start = NULL;
+    size_t prefix_len;
+    size_t name_end;
+    int append_space = 0;
     char partial[TENET_MAX_USERNAME];
     client_t *cursor;
     const client_t *match = NULL;
     size_t match_count = 0;
     size_t partial_len;
 
-    if (!client->in_chat || strncmp(buffer, prefix_start, prefix_len) != 0 ||
-        client->input_cursor < prefix_len) {
+    if (!client->in_chat) {
         return;
     }
-    if (strchr(buffer + prefix_len, ' ') != NULL) {
+    if (strncmp(buffer, "/pm ", 4) == 0) {
+        prefix_start = "/pm ";
+    } else if (strncmp(buffer, "/msg ", 5) == 0) {
+        prefix_start = "/msg ";
+        append_space = 1;
+    } else {
         return;
     }
-    partial_len = *len - prefix_len;
+    prefix_len = strlen(prefix_start);
+    if (client->input_cursor < prefix_len) {
+        return;
+    }
+    name_end = prefix_len;
+    while (name_end < *len && !isspace((unsigned char)buffer[name_end])) {
+        name_end++;
+    }
+    if (client->input_cursor > name_end) {
+        return;
+    }
+    if (!append_space && name_end < *len) {
+        return;
+    }
+    partial_len = client->input_cursor - prefix_len;
     if (partial_len >= sizeof(partial)) {
         partial_len = sizeof(partial) - 1;
     }
@@ -792,10 +934,16 @@ static void input_autocomplete(client_t *client, char *buffer, size_t *len, size
     }
     if (match_count == 1 && match != NULL) {
         char completed[TENET_MAX_LINE];
+        const char *tail = buffer + name_end;
+        const char *separator = append_space && *tail == '\0' ? " " : "";
 
-        snprintf(completed, sizeof(completed), "/pm %s", match->username);
+        snprintf(completed, sizeof(completed), "%s%s%s%s",
+                 prefix_start, match->username, separator, tail);
         if (strlen(completed) < size) {
             input_set_buffer(client, buffer, len, completed);
+            if (append_space && *tail != '\0') {
+                client->input_cursor = prefix_len + strlen(match->username);
+            }
         }
     }
     pthread_mutex_unlock(&global_state->mutex);
@@ -1060,6 +1208,11 @@ static int csi_modifier_has_shift(int modifier)
     return modifier > 1 && ((modifier - 1) & 1) != 0;
 }
 
+static int csi_modifier_has_alt(int modifier)
+{
+    return modifier > 1 && ((modifier - 1) & 2) != 0;
+}
+
 static int csi_modifier_has_ctrl(int modifier)
 {
     return modifier > 1 && ((modifier - 1) & 4) != 0;
@@ -1087,6 +1240,9 @@ static int input_handle_readline_control(client_t *client,
     case 'f':
         input_move_right(client);
         return 1;
+    case 'd':
+        input_delete_at_cursor(client, buffer, len);
+        return 1;
     case 'p':
         input_history_previous(client, buffer, len);
         return 1;
@@ -1094,21 +1250,45 @@ static int input_handle_readline_control(client_t *client,
         input_history_next(client, buffer, len);
         return 1;
     case 'k':
-        buffer[client->input_cursor] = '\0';
-        *len = client->input_cursor;
-        safe_copy(client->input_line, sizeof(client->input_line), buffer);
-        input_cancel_history_browse(client);
+        input_delete_to_line_end(client, buffer, len);
         return 1;
     case 'u':
-        memmove(buffer, buffer + client->input_cursor, *len - client->input_cursor + 1);
-        *len -= client->input_cursor;
-        client->input_cursor = 0;
-        safe_copy(client->input_line, sizeof(client->input_line), buffer);
-        input_cancel_history_browse(client);
+        input_delete_to_line_start(client, buffer, len);
+        return 1;
+    case 'w':
+        input_delete_word_before_cursor(client, buffer, len);
         return 1;
     case 'h':
     case 127:
         input_delete_before_cursor(client, buffer, len);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int input_handle_meta_control(client_t *client,
+                                     char *buffer,
+                                     size_t *len,
+                                     int codepoint)
+{
+    if (codepoint >= 'A' && codepoint <= 'Z') {
+        codepoint = codepoint - 'A' + 'a';
+    }
+
+    switch (codepoint) {
+    case 'b':
+        input_move_word_left(client);
+        return 1;
+    case 'f':
+        input_move_word_right(client);
+        return 1;
+    case 'd':
+        input_delete_word_at_cursor(client, buffer, len);
+        return 1;
+    case 'h':
+    case 127:
+        input_delete_word_before_cursor(client, buffer, len);
         return 1;
     default:
         return 0;
@@ -1129,6 +1309,33 @@ static int csi_handle_readline_control(client_t *client,
     if (final == '~' && param_count >= 3 &&
         params[0] == 27 && csi_modifier_has_ctrl(params[1])) {
         return input_handle_readline_control(client, buffer, len, params[2]);
+    }
+    return 0;
+}
+
+static int csi_handle_meta_control(client_t *client,
+                                   char *buffer,
+                                   size_t *len,
+                                   char final,
+                                   const int *params,
+                                   size_t param_count)
+{
+    if ((final == 'u' || final == 'U') &&
+        param_count >= 2 && csi_modifier_has_alt(params[1])) {
+        return input_handle_meta_control(client, buffer, len, params[0]);
+    }
+    if (final == '~' && param_count >= 3 &&
+        params[0] == 27 && csi_modifier_has_alt(params[1])) {
+        return input_handle_meta_control(client, buffer, len, params[2]);
+    }
+    if ((final == 'C' || final == 'D') && param_count >= 2 &&
+        (csi_modifier_has_alt(params[1]) || csi_modifier_has_ctrl(params[1]))) {
+        if (final == 'C') {
+            input_move_word_right(client);
+        } else {
+            input_move_word_left(client);
+        }
+        return 1;
     }
     return 0;
 }
@@ -1170,6 +1377,10 @@ static void handle_csi_sequence(client_t *client,
     }
 
     if (csi_handle_readline_control(client, buffer, len, final, params, param_count)) {
+        return;
+    }
+
+    if (csi_handle_meta_control(client, buffer, len, final, params, param_count)) {
         return;
     }
 
@@ -1239,6 +1450,8 @@ static int read_escape_sequence(client_t *client,
         return 1;
     }
     if (byte != '[') {
+        (void)input_handle_meta_control(client, buffer, len, byte);
+        safe_copy(client->input_line, sizeof(client->input_line), buffer);
         return 1;
     }
 
@@ -1385,7 +1598,15 @@ int read_line(client_t *client, char *buffer, size_t size, int secret)
             }
             return 1;
         }
-        if (byte == 3 || byte == 4) {
+        if (byte == 3) {
+            if (client->in_chat && len > 0) {
+                input_delete_at_cursor(client, buffer, &len);
+                refresh_client_input(global_state, client);
+                continue;
+            }
+            return 0;
+        }
+        if (byte == 4) {
             return 0;
         }
         if (client->in_chat && byte == '\t') {
@@ -1432,11 +1653,12 @@ int read_line(client_t *client, char *buffer, size_t size, int secret)
             continue;
         }
         if (client->in_chat && byte == 21) {
-            memmove(buffer, buffer + client->input_cursor, len - client->input_cursor + 1);
-            len -= client->input_cursor;
-            client->input_cursor = 0;
-            safe_copy(client->input_line, sizeof(client->input_line), buffer);
-            input_cancel_history_browse(client);
+            input_delete_to_line_start(client, buffer, &len);
+            refresh_client_input(global_state, client);
+            continue;
+        }
+        if (client->in_chat && byte == 23) {
+            input_delete_word_before_cursor(client, buffer, &len);
             refresh_client_input(global_state, client);
             continue;
         }
@@ -2809,7 +3031,7 @@ static void send_help(server_state_t *state, client_t *client)
                                      "/help 帮助 | "
                                      "/list 在线用户 | "
                                      "/pm " ANSI_YELLOW "<用户ID>" ANSI_RESET " 打开私聊 | "
-                                     "/msg " ANSI_YELLOW "<用户ID>" ANSI_RESET " " ANSI_YELLOW "<内容>" ANSI_RESET " 发送私聊 | "
+                                     "/msg " ANSI_YELLOW "<用户ID>" ANSI_RESET " " ANSI_YELLOW "<内容>" ANSI_RESET " 发送私聊 | Tab 补全用户 | "
                                      "/close 关闭私聊 | "
                                      "/me " ANSI_YELLOW "<动作>" ANSI_RESET " | "
                                      "/quit 退出");
