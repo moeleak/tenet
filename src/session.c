@@ -191,7 +191,7 @@ static void setup_terminal(terminal_state_t *state)
         return;
     }
     raw = state->old_termios;
-    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | IEXTEN);
+    raw.c_lflag &= (tcflag_t)~(ECHO | ICANON | IEXTEN | ISIG);
     raw.c_iflag &= (tcflag_t)~(IXON | ICRNL | INLCR);
     raw.c_oflag &= (tcflag_t)~(OPOST);
     raw.c_cc[VMIN] = 1;
