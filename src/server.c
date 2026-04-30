@@ -1060,6 +1060,79 @@ static int csi_modifier_has_shift(int modifier)
     return modifier > 1 && ((modifier - 1) & 1) != 0;
 }
 
+static int csi_modifier_has_ctrl(int modifier)
+{
+    return modifier > 1 && ((modifier - 1) & 4) != 0;
+}
+
+static int input_handle_readline_control(client_t *client,
+                                         char *buffer,
+                                         size_t *len,
+                                         int codepoint)
+{
+    if (codepoint >= 'A' && codepoint <= 'Z') {
+        codepoint = codepoint - 'A' + 'a';
+    }
+
+    switch (codepoint) {
+    case 'a':
+        client->input_cursor = 0;
+        return 1;
+    case 'e':
+        client->input_cursor = *len;
+        return 1;
+    case 'b':
+        input_move_left(client);
+        return 1;
+    case 'f':
+        input_move_right(client);
+        return 1;
+    case 'p':
+        input_history_previous(client, buffer, len);
+        return 1;
+    case 'n':
+        input_history_next(client, buffer, len);
+        return 1;
+    case 'k':
+        buffer[client->input_cursor] = '\0';
+        *len = client->input_cursor;
+        safe_copy(client->input_line, sizeof(client->input_line), buffer);
+        input_cancel_history_browse(client);
+        return 1;
+    case 'u':
+        memmove(buffer, buffer + client->input_cursor, *len - client->input_cursor + 1);
+        *len -= client->input_cursor;
+        client->input_cursor = 0;
+        safe_copy(client->input_line, sizeof(client->input_line), buffer);
+        input_cancel_history_browse(client);
+        return 1;
+    case 'h':
+    case 127:
+        input_delete_before_cursor(client, buffer, len);
+        return 1;
+    default:
+        return 0;
+    }
+}
+
+static int csi_handle_readline_control(client_t *client,
+                                       char *buffer,
+                                       size_t *len,
+                                       char final,
+                                       const int *params,
+                                       size_t param_count)
+{
+    if ((final == 'u' || final == 'U') &&
+        param_count >= 2 && csi_modifier_has_ctrl(params[1])) {
+        return input_handle_readline_control(client, buffer, len, params[0]);
+    }
+    if (final == '~' && param_count >= 3 &&
+        params[0] == 27 && csi_modifier_has_ctrl(params[1])) {
+        return input_handle_readline_control(client, buffer, len, params[2]);
+    }
+    return 0;
+}
+
 static int csi_is_shift_enter(char final, const int *params, size_t count)
 {
     if ((final == 'u' || final == 'U') &&
@@ -1093,6 +1166,10 @@ static void handle_csi_sequence(client_t *client,
 
     if ((final == 'M' || final == 'm') && param_count >= 3) {
         handle_mouse_event(client, params[0], params[1], params[2], final == 'M');
+        return;
+    }
+
+    if (csi_handle_readline_control(client, buffer, len, final, params, param_count)) {
         return;
     }
 
@@ -2728,7 +2805,32 @@ static int show_entry_screen(client_t *client)
 static void send_help(server_state_t *state, client_t *client)
 {
     append_system_message_for_client(state, client,
-                                     "命令: /help 帮助 · /who 在线用户 · /pm 用户ID 打开私聊 · /msg 用户ID 内容 发送私聊 · /close 关闭私聊 · /me 动作 · /quit 退出；可点击在线用户私聊");
+                                     "命令: "
+                                     "/help 帮助 | "
+                                     "/list 在线用户 | "
+                                     "/pm " ANSI_YELLOW "<用户ID>" ANSI_RESET " 打开私聊 | "
+                                     "/msg " ANSI_YELLOW "<用户ID>" ANSI_RESET " " ANSI_YELLOW "<内容>" ANSI_RESET " 发送私聊 | "
+                                     "/close 关闭私聊 | "
+                                     "/me " ANSI_YELLOW "<动作>" ANSI_RESET " | "
+                                     "/quit 退出");
+}
+
+static void send_usage(server_state_t *state, client_t *client, const char *usage)
+{
+    char line[256];
+
+    snprintf(line, sizeof(line), ANSI_RED "用法: " ANSI_RESET "%s", usage);
+    append_system_message_for_client(state, client, line);
+}
+
+static void send_pm_usage(server_state_t *state, client_t *client)
+{
+    send_usage(state, client, "/pm " ANSI_YELLOW "<用户ID>" ANSI_RESET);
+}
+
+static void send_msg_usage(server_state_t *state, client_t *client)
+{
+    send_usage(state, client, "/msg " ANSI_YELLOW "<用户ID>" ANSI_RESET " " ANSI_YELLOW "<内容>" ANSI_RESET);
 }
 
 static void add_multiline_message_locked(server_state_t *state,
@@ -2801,7 +2903,7 @@ static void add_private_multiline_message_locked(server_state_t *state,
 
         if (first) {
             snprintf(line, sizeof(line), ANSI_DIM "[%s]" ANSI_RESET " " ANSI_MAGENTA "%s" ANSI_RESET ": %s",
-                     timebuf, sender->username, part);
+                     timebuf, client_name(sender), part);
         } else {
             snprintf(line, sizeof(line), ANSI_DIM "      │" ANSI_RESET " %s", part);
         }
@@ -3009,13 +3111,13 @@ static int send_private_message_to(server_state_t *state,
 static void send_private_message(server_state_t *state, client_t *sender, const char *message)
 {
     if (sender->active_peer_username[0] == '\0') {
-        append_system_message_for_client(state, sender, ANSI_RED "请先使用 /pm 用户ID 打开私聊。" ANSI_RESET);
+        append_system_message_for_client(state, sender, ANSI_RED "请先使用 " ANSI_RESET "/pm " ANSI_YELLOW "<用户ID>" ANSI_RED " 打开私聊。" ANSI_RESET);
         return;
     }
     (void)send_private_message_to(state, sender, sender->active_peer_username, message);
 }
 
-static void send_who(server_state_t *state, client_t *client)
+static void send_list(server_state_t *state, client_t *client)
 {
     client_t *cursor;
     char line[TENET_HISTORY_LINE];
@@ -3037,9 +3139,9 @@ static void send_who(server_state_t *state, client_t *client)
         if (!cursor->in_chat) {
             continue;
         }
-        written = snprintf(line + used, sizeof(line) - used, "%s%s",
+        written = snprintf(line + used, sizeof(line) - used, "%s%s(%s)",
                            first ? "" : ", ",
-                           client_name(cursor));
+                           client_name(cursor), cursor->username);
         if (written < 0 || (size_t)written >= sizeof(line) - used) {
             break;
         }
@@ -3055,15 +3157,15 @@ static void handle_command(server_state_t *state, client_t *client, char *line, 
 {
     if (strcmp(line, "/help") == 0) {
         send_help(state, client);
-    } else if (strcmp(line, "/who") == 0) {
-        send_who(state, client);
-    } else if (strncmp(line, "/pm ", 4) == 0) {
-        char *name = line + 4;
+    } else if (strcmp(line, "/list") == 0) {
+        send_list(state, client);
+    } else if (strncmp(line, "/pm", 3) == 0 && (line[3] == '\0' || isspace((unsigned char)line[3]))) {
+        char *name = line + 3;
         client_t *recipient;
 
         trim_line(name);
         if (!valid_username(name)) {
-            append_system_message_for_client(state, client, ANSI_RED "用法: /pm 用户ID" ANSI_RESET);
+            send_pm_usage(state, client);
             return;
         }
         if (ascii_equal_ignore_case(name, client->username)) {
@@ -3085,8 +3187,8 @@ static void handle_command(server_state_t *state, client_t *client, char *line, 
         }
         refresh_client_screen_locked(state, client);
         pthread_mutex_unlock(&state->mutex);
-    } else if (strncmp(line, "/msg ", 5) == 0) {
-        char *name = line + 5;
+    } else if (strncmp(line, "/msg", 4) == 0 && (line[4] == '\0' || isspace((unsigned char)line[4]))) {
+        char *name = line + 4;
         char *message;
 
         while (isspace((unsigned char)*name)) {
@@ -3101,7 +3203,7 @@ static void handle_command(server_state_t *state, client_t *client, char *line, 
         }
         trim_line(message);
         if (!valid_username(name) || message[0] == '\0') {
-            append_system_message_for_client(state, client, ANSI_RED "用法: /msg 用户ID 内容" ANSI_RESET);
+            send_msg_usage(state, client);
             return;
         }
         if (send_private_message_to(state, client, name, message) == 0 &&

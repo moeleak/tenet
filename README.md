@@ -178,9 +178,9 @@ TENET_SOCKET=/run/tenet.sock ./tenet --ssh-backend
 
 ```text
 /help        显示帮助
-/who         查看在线用户
-/pm USER     按用户 ID 打开私聊，支持 Tab 补全，也可点击在线用户
-/msg USER TEXT  按用户 ID 发送一次私聊，不切换当前聊天
+/list        查看在线用户
+/pm <USER>   按用户 ID 打开私聊，支持 Tab 补全
+/msg <USER> <TEXT>  按用户 ID 发送一次私聊，不切换当前聊天
 /close       关闭当前私聊标签；大厅不能关闭
 /me TEXT     发送动作消息
 /quit        退出聊天室
