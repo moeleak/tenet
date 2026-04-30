@@ -192,7 +192,7 @@ TENET_SOCKET=/run/tenet.sock ./tenet --ssh-backend
 /quit        退出聊天室
 ```
 
-输入框支持 Readline 风格快捷键：`Ctrl-A/E/B/F`、`Alt-B/F`、`Ctrl-W`、`Ctrl-U/K`、`Ctrl-C`、上下历史和左右方向键。
+输入框支持 Readline 风格快捷键：`Ctrl-A/E/B/F`、`Alt-B/F`、`Ctrl-W`、`Ctrl-U/K`、上下历史和左右方向键；`Ctrl-C` 有内容时清空当前输入，空输入时退出。
 
 ## systemd 示例
 

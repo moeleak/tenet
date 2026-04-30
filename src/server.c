@@ -730,16 +730,13 @@ static void input_delete_at_cursor(client_t *client, char *buffer, size_t *len)
     input_cancel_history_browse(client);
 }
 
-static void input_delete_interrupt_char(client_t *client, char *buffer, size_t *len)
+static void input_clear_line(client_t *client, char *buffer, size_t *len)
 {
-    if (*len == 0) {
-        return;
-    }
-    if (client->input_cursor >= *len) {
-        input_delete_before_cursor(client, buffer, len);
-    } else {
-        input_delete_at_cursor(client, buffer, len);
-    }
+    buffer[0] = '\0';
+    *len = 0;
+    client->input_cursor = 0;
+    safe_copy(client->input_line, sizeof(client->input_line), buffer);
+    input_cancel_history_browse(client);
 }
 
 static void input_insert_byte(client_t *client, char *buffer, size_t *len, size_t size, unsigned char byte)
@@ -1551,7 +1548,7 @@ static int read_escape_sequence(client_t *client,
                 safe_copy(client->input_line, sizeof(client->input_line), buffer);
                 return 0;
             }
-            input_delete_interrupt_char(client, buffer, len);
+            input_clear_line(client, buffer, len);
             safe_copy(client->input_line, sizeof(client->input_line), buffer);
             return 1;
         }
@@ -1640,7 +1637,7 @@ int read_line(client_t *client, char *buffer, size_t size, int secret)
         }
         if (byte == 3) {
             if (client->in_chat && len > 0) {
-                input_delete_interrupt_char(client, buffer, &len);
+                input_clear_line(client, buffer, &len);
                 refresh_client_input(global_state, client);
                 continue;
             }
