@@ -343,6 +343,7 @@ PermitTunnel no
 PermitUserEnvironment no
 ClientAliveInterval 60
 ClientAliveCountMax 3
+PerSourcePenalties no
 AcceptEnv LANG LC_*
 ForceCommand /usr/local/bin/tenet-ssh-command --socket ${TENET_SOCKET} --copy-id ${TENET_ENABLE_SSH_COPY_ID}
 Subsystem sftp internal-sftp

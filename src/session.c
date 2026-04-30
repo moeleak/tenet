@@ -26,6 +26,7 @@ typedef struct terminal_state {
 } terminal_state_t;
 
 static volatile sig_atomic_t resize_pending;
+static volatile sig_atomic_t interrupt_pending;
 
 static int connect_backend(const char *path)
 {
@@ -182,6 +183,12 @@ static void handle_resize_signal(int signum)
     resize_pending = 1;
 }
 
+static void handle_interrupt_signal(int signum)
+{
+    (void)signum;
+    interrupt_pending = 1;
+}
+
 static void setup_terminal(terminal_state_t *state)
 {
     struct termios raw;
@@ -253,6 +260,14 @@ static int copy_loop(int backend_fd)
             resize_pending = 0;
             send_window_size(backend_fd);
         }
+        if (interrupt_pending) {
+            const unsigned char interrupt_byte = 3;
+
+            interrupt_pending = 0;
+            if (write_all(backend_fd, &interrupt_byte, 1) != 0) {
+                return -1;
+            }
+        }
 
         FD_ZERO(&read_set);
         FD_SET(backend_fd, &read_set);
@@ -314,7 +329,9 @@ static int copy_loop(int backend_fd)
 int tenet_session_run(const tenet_config_t *config)
 {
     terminal_state_t terminal;
+    struct sigaction old_int;
     struct sigaction old_winch;
+    struct sigaction int_action;
     struct sigaction winch_action;
     int fd = connect_backend(config->socket_path);
     int rc;
@@ -323,12 +340,17 @@ int tenet_session_run(const tenet_config_t *config)
         return -1;
     }
     setup_terminal(&terminal);
+    memset(&int_action, 0, sizeof(int_action));
+    int_action.sa_handler = handle_interrupt_signal;
+    sigemptyset(&int_action.sa_mask);
+    (void)sigaction(SIGINT, &int_action, &old_int);
     memset(&winch_action, 0, sizeof(winch_action));
     winch_action.sa_handler = handle_resize_signal;
     sigemptyset(&winch_action.sa_mask);
     (void)sigaction(SIGWINCH, &winch_action, &old_winch);
     send_hello(fd);
     rc = copy_loop(fd);
+    (void)sigaction(SIGINT, &old_int, NULL);
     (void)sigaction(SIGWINCH, &old_winch, NULL);
     restore_terminal(&terminal);
     close(fd);

@@ -730,6 +730,18 @@ static void input_delete_at_cursor(client_t *client, char *buffer, size_t *len)
     input_cancel_history_browse(client);
 }
 
+static void input_delete_interrupt_char(client_t *client, char *buffer, size_t *len)
+{
+    if (*len == 0) {
+        return;
+    }
+    if (client->input_cursor >= *len) {
+        input_delete_before_cursor(client, buffer, len);
+    } else {
+        input_delete_at_cursor(client, buffer, len);
+    }
+}
+
 static void input_insert_byte(client_t *client, char *buffer, size_t *len, size_t size, unsigned char byte)
 {
     if (*len + 1 >= size) {
@@ -1313,6 +1325,25 @@ static int csi_handle_readline_control(client_t *client,
     return 0;
 }
 
+static int csi_is_ctrl_key(char final, const int *params, size_t param_count, int key)
+{
+    int codepoint = 0;
+
+    if ((final == 'u' || final == 'U') &&
+        param_count >= 2 && csi_modifier_has_ctrl(params[1])) {
+        codepoint = params[0];
+    } else if (final == '~' && param_count >= 3 &&
+               params[0] == 27 && csi_modifier_has_ctrl(params[1])) {
+        codepoint = params[2];
+    } else {
+        return 0;
+    }
+    if (codepoint >= 'A' && codepoint <= 'Z') {
+        codepoint = codepoint - 'A' + 'a';
+    }
+    return codepoint == key;
+}
+
 static int csi_handle_meta_control(client_t *client,
                                    char *buffer,
                                    size_t *len,
@@ -1515,6 +1546,15 @@ static int read_escape_sequence(client_t *client,
         }
         sequence[used] = '\0';
         param_count = parse_csi_params(sequence, used - 1, params, sizeof(params) / sizeof(params[0]));
+        if (csi_is_ctrl_key(final, params, param_count, 'c')) {
+            if (*len == 0) {
+                safe_copy(client->input_line, sizeof(client->input_line), buffer);
+                return 0;
+            }
+            input_delete_interrupt_char(client, buffer, len);
+            safe_copy(client->input_line, sizeof(client->input_line), buffer);
+            return 1;
+        }
         handle_csi_sequence(client, buffer, len, size, final, params, param_count);
     }
 
@@ -1600,7 +1640,7 @@ int read_line(client_t *client, char *buffer, size_t size, int secret)
         }
         if (byte == 3) {
             if (client->in_chat && len > 0) {
-                input_delete_at_cursor(client, buffer, &len);
+                input_delete_interrupt_char(client, buffer, &len);
                 refresh_client_input(global_state, client);
                 continue;
             }
