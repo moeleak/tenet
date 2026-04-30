@@ -245,27 +245,54 @@ out:
     return rc;
 }
 
-int bot_ollama_chat(const bot_config_t *config,
-                    const char *system_prompt,
-                    const char *user_prompt,
-                    bot_str_t *answer,
-                    char *error,
-                    size_t error_size)
+static int append_chat_message(bot_str_t *body, const char *role, const char *content, int first)
+{
+    if (!first && bot_str_append_char(body, ',') != 0) {
+        return -1;
+    }
+    if (bot_str_append(body, "{\"role\":") != 0 ||
+        bot_json_append_string(body, role != NULL ? role : "user") != 0 ||
+        bot_str_append(body, ",\"content\":") != 0 ||
+        bot_json_append_string(body, content != NULL ? content : "") != 0 ||
+        bot_str_append_char(body, '}') != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int bot_ollama_chat_messages(const bot_config_t *config,
+                             const bot_ollama_message_t *messages,
+                             size_t message_count,
+                             bot_str_t *answer,
+                             char *error,
+                             size_t error_size)
 {
     bot_str_t body;
     bot_str_t response;
     int status = 0;
     int rc = -1;
+    size_t index;
+
+    if (messages == NULL || message_count == 0) {
+        set_error(error, error_size, "聊天 messages 为空");
+        return -1;
+    }
 
     bot_str_init(&body);
     bot_str_init(&response);
     if (bot_str_append(&body, "{\"model\":") != 0 ||
         bot_json_append_string(&body, config->chat_model) != 0 ||
-        bot_str_append(&body, ",\"stream\":false,\"messages\":[{\"role\":\"system\",\"content\":") != 0 ||
-        bot_json_append_string(&body, system_prompt) != 0 ||
-        bot_str_append(&body, "},{\"role\":\"user\",\"content\":") != 0 ||
-        bot_json_append_string(&body, user_prompt) != 0 ||
-        bot_str_append(&body, "}]}") != 0) {
+        bot_str_append(&body, ",\"stream\":false,\"messages\":[") != 0) {
+        set_error(error, error_size, "构造聊天请求失败");
+        goto out;
+    }
+    for (index = 0; index < message_count; index++) {
+        if (append_chat_message(&body, messages[index].role, messages[index].content, index == 0) != 0) {
+            set_error(error, error_size, "构造聊天 messages 失败");
+            goto out;
+        }
+    }
+    if (bot_str_append(&body, "]}") != 0) {
         set_error(error, error_size, "构造聊天请求失败");
         goto out;
     }
@@ -296,4 +323,20 @@ out:
     bot_str_free(&body);
     bot_str_free(&response);
     return rc;
+}
+
+int bot_ollama_chat(const bot_config_t *config,
+                    const char *system_prompt,
+                    const char *user_prompt,
+                    bot_str_t *answer,
+                    char *error,
+                    size_t error_size)
+{
+    bot_ollama_message_t messages[2];
+
+    messages[0].role = "system";
+    messages[0].content = system_prompt;
+    messages[1].role = "user";
+    messages[1].content = user_prompt;
+    return bot_ollama_chat_messages(config, messages, 2, answer, error, error_size);
 }

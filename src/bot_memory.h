@@ -13,13 +13,37 @@ typedef struct bot_memory {
     int vss_enabled;
 } bot_memory_t;
 
+typedef struct bot_memory_chat_message {
+    char role[16];
+    char *content;
+} bot_memory_chat_message_t;
+
+typedef struct bot_memory_chat_history {
+    bot_memory_chat_message_t *items;
+    size_t count;
+    size_t cap;
+} bot_memory_chat_history_t;
+
 int bot_memory_open(bot_memory_t *memory,
                     const bot_config_t *config,
                     char *error,
                     size_t error_size);
 void bot_memory_close(bot_memory_t *memory);
+void bot_memory_chat_history_init(bot_memory_chat_history_t *history);
+void bot_memory_chat_history_free(bot_memory_chat_history_t *history);
 int bot_memory_is_seen(bot_memory_t *memory, const char *fingerprint);
 int bot_memory_mark_seen(bot_memory_t *memory, const char *fingerprint);
+int bot_memory_store_observed_message(bot_memory_t *memory,
+                                      const char *sender,
+                                      const char *target_user,
+                                      const char *content,
+                                      char *error,
+                                      size_t error_size);
+int bot_memory_store_answer(bot_memory_t *memory,
+                            const char *target_user,
+                            const char *answer,
+                            char *error,
+                            size_t error_size);
 int bot_memory_store_exchange(bot_memory_t *memory,
                               const char *sender,
                               const char *question,
@@ -50,6 +74,13 @@ int bot_memory_append_recent_context(bot_memory_t *memory,
                                      const char *username,
                                      int limit,
                                      bot_str_t *out);
+int bot_memory_load_recent_chat_history(bot_memory_t *memory,
+                                        const char *username,
+                                        int include_private,
+                                        int limit,
+                                        bot_memory_chat_history_t *history,
+                                        char *error,
+                                        size_t error_size);
 int bot_memory_summary_due(bot_memory_t *memory,
                            const char *scope,
                            const char *username,

@@ -11,6 +11,7 @@
 #include <unistd.h>
 
 #define BOT_REPLY_CHUNK 1500
+#define BOT_RECENT_CONTEXT_HARD_CAP 16
 
 static int sender_is_bot(const bot_config_t *config, const char *sender)
 {
@@ -56,36 +57,102 @@ static void build_question(const bot_config_t *config, const char *message, char
     }
 }
 
-static int append_prompt_context(const bot_config_t *config,
-                                 bot_memory_t *memory,
-                                 const char *sender,
-                                 const char *question,
-                                 const char *embedding_json,
-                                 bot_str_t *prompt)
+static int build_reference_context(const bot_config_t *config,
+                                   bot_memory_t *memory,
+                                   const char *sender,
+                                   const char *embedding_json,
+                                   bot_str_t *context)
 {
     char error[512];
 
-    if (bot_str_appendf(prompt, "当前发言者: %s\n当前问题: %s\n\n", sender, question) != 0) {
+    if (bot_str_appendf(context, "当前发言者: %s\n", sender) != 0) {
         return -1;
     }
-    (void)bot_memory_append_summary(memory, "global", "", prompt);
-    (void)bot_memory_append_summary(memory, "user", sender, prompt);
+    (void)bot_memory_append_summary(memory, "global", "", context);
+    (void)bot_memory_append_summary(memory, "user", sender, context);
     if (embedding_json != NULL && *embedding_json != '\0') {
         if (bot_memory_search(memory, "global", "", embedding_json,
-                              config->memory_top_k, prompt, error, sizeof(error)) != 0) {
+                              config->memory_top_k, context, error, sizeof(error)) != 0) {
             fprintf(stderr, "tenet-bot: 全局向量检索失败: %s\n", error);
         }
         if (bot_memory_search(memory, "user", sender, embedding_json,
-                              config->memory_top_k, prompt, error, sizeof(error)) != 0) {
+                              config->memory_top_k, context, error, sizeof(error)) != 0) {
             fprintf(stderr, "tenet-bot: 用户向量检索失败: %s\n", error);
         }
     }
-    (void)bot_memory_append_recent_context(memory, sender, config->context_messages, prompt);
-    if (bot_str_append(prompt,
-                       "\n请基于以上 context、长期记忆和当前问题回答。"
-                       "如果记忆不相关，不要强行引用。\n") != 0) {
+    return 0;
+}
+
+static int build_system_message(const char *base_prompt,
+                                const bot_str_t *reference_context,
+                                bot_str_t *system_message)
+{
+    if (bot_str_append(system_message, base_prompt) != 0 ||
+        bot_str_append(system_message,
+                       "\n历史对话会通过 API messages 数组传入；按 messages 的先后顺序理解上下文。"
+                       "不要把参考资料当成用户原话，不要复读历史 assistant 回复。") != 0) {
         return -1;
     }
+    if (reference_context != NULL && reference_context->data != NULL && reference_context->len > 0) {
+        if (bot_str_append(system_message, "\n\n参考资料（只用于辅助理解当前问题，不要逐字复述）:\n") != 0 ||
+            bot_str_append(system_message, reference_context->data) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static int load_chat_messages(const bot_config_t *config,
+                              bot_memory_t *memory,
+                              const bot_event_t *event,
+                              const char *fallback_question,
+                              const char *system_message,
+                              bot_memory_chat_history_t *history,
+                              bot_ollama_message_t **messages_out,
+                              size_t *message_count_out,
+                              char *error,
+                              size_t error_size)
+{
+    bot_ollama_message_t *messages;
+    size_t index;
+    size_t count;
+    int history_has_current = 0;
+    int recent_limit = config->context_messages;
+
+    *messages_out = NULL;
+    *message_count_out = 0;
+    if (recent_limit > BOT_RECENT_CONTEXT_HARD_CAP) {
+        recent_limit = BOT_RECENT_CONTEXT_HARD_CAP;
+    }
+    if (bot_memory_load_recent_chat_history(memory, event->sender, event->private_chat,
+                                            recent_limit, history, error, error_size) != 0) {
+        return -1;
+    }
+    if (history->count > 0 &&
+        strcmp(history->items[history->count - 1].role, "user") == 0 &&
+        strstr(history->items[history->count - 1].content, event->text) != NULL) {
+        history_has_current = 1;
+    }
+    count = 1 + history->count + (history_has_current ? 0 : 1);
+    messages = calloc(count, sizeof(messages[0]));
+    if (messages == NULL) {
+        snprintf(error, error_size, "构造聊天 messages 失败: 内存不足");
+        return -1;
+    }
+    messages[0].role = "system";
+    messages[0].content = system_message;
+    for (index = 0; index < history->count; index++) {
+        messages[index + 1].role = history->items[index].role;
+        messages[index + 1].content = history->items[index].content;
+    }
+    if (history_has_current) {
+        messages[history->count].content = fallback_question;
+    } else {
+        messages[history->count + 1].role = "user";
+        messages[history->count + 1].content = fallback_question;
+    }
+    *messages_out = messages;
+    *message_count_out = count;
     return 0;
 }
 
@@ -219,6 +286,7 @@ out:
 static void remember_exchange(const bot_config_t *config,
                               bot_memory_t *memory,
                               const char *sender,
+                              const char *target_user,
                               const char *question,
                               const char *answer)
 {
@@ -227,8 +295,8 @@ static void remember_exchange(const bot_config_t *config,
     bot_str_t vector_json;
     char error[512];
 
-    if (bot_memory_store_exchange(memory, sender, question, answer, error, sizeof(error)) != 0) {
-        fprintf(stderr, "tenet-bot: 保存问答失败: %s\n", error);
+    if (bot_memory_store_answer(memory, target_user, answer, error, sizeof(error)) != 0) {
+        fprintf(stderr, "tenet-bot: 保存回复失败: %s\n", error);
         return;
     }
 
@@ -236,7 +304,7 @@ static void remember_exchange(const bot_config_t *config,
     bot_str_init(&vector_json);
     vector.values = NULL;
     vector.count = 0;
-    if (bot_str_appendf(&memory_text, "用户 %s 问: %s\nbot 答: %s", sender, question, answer) != 0) {
+    if (bot_str_appendf(&memory_text, "用户 %s 问过: %s", sender, question) != 0) {
         goto out;
     }
     if (bot_ollama_embed(config, memory_text.data, &vector, error, sizeof(error)) != 0) {
@@ -275,12 +343,18 @@ static void answer_message(const bot_config_t *config,
     char error[512];
     bot_vector_t query_vector;
     bot_str_t query_vector_json;
-    bot_str_t prompt;
+    bot_str_t reference_context;
+    bot_str_t system_message;
     bot_str_t answer;
+    bot_memory_chat_history_t history;
+    bot_ollama_message_t *messages = NULL;
+    size_t message_count = 0;
     const char *system_prompt =
         "你是 tenet-bot，一个运行在 tenet 终端聊天室里的 AI 助手。"
-        "你能看到长期记忆、相关向量检索结果和最近上下文。"
-        "优先用中文简洁回答；不知道就说不知道；不要假装看到了不存在的信息。"
+        "你能看到长期记忆、相关向量检索结果和通过 API messages 传入的最近对话。"
+        "优先用中文简洁直接回答当前问题；不知道就说不知道。"
+        "不要角色扮演、卖萌、自称宝宝或模仿历史回复语气；即使显示名像角色名也只当作昵称。"
+        "不要复述无关上下文，不要假装看到了不存在的信息。"
         "不要输出 <think> 标签、推理过程或内部思考。";
 
     build_question(config, message->text, question, sizeof(question));
@@ -293,8 +367,10 @@ static void answer_message(const bot_config_t *config,
     query_vector.values = NULL;
     query_vector.count = 0;
     bot_str_init(&query_vector_json);
-    bot_str_init(&prompt);
+    bot_str_init(&reference_context);
+    bot_str_init(&system_message);
     bot_str_init(&answer);
+    bot_memory_chat_history_init(&history);
 
     if (bot_ollama_embed(config, question, &query_vector, error, sizeof(error)) == 0) {
         if (bot_vector_to_json(&query_vector, &query_vector_json) != 0) {
@@ -307,16 +383,26 @@ static void answer_message(const bot_config_t *config,
         fprintf(stderr, "tenet-bot: embedding 失败，降级为摘要+最近上下文: %s\n", error);
     }
 
-    if (append_prompt_context(config, memory, message->sender, question,
-                              query_vector_json.len > 0 ? query_vector_json.data : NULL,
-                              &prompt) != 0) {
+    if (build_reference_context(config, memory, message->sender,
+                                query_vector_json.len > 0 ? query_vector_json.data : NULL,
+                                &reference_context) != 0 ||
+        build_system_message(system_prompt, &reference_context, &system_message) != 0) {
         char line[256];
 
-        snprintf(line, sizeof(line), "%stenet-bot 内部错误：构造 prompt 失败。", prefix);
+        snprintf(line, sizeof(line), "%stenet-bot 内部错误：构造 system prompt 失败。", prefix);
         (void)send_reply_line(fd, message->private_chat, message->sender, line);
         goto out;
     }
-    if (bot_ollama_chat(config, system_prompt, prompt.data, &answer, error, sizeof(error)) != 0) {
+    if (load_chat_messages(config, memory, message, question, system_message.data,
+                           &history, &messages, &message_count,
+                           error, sizeof(error)) != 0) {
+        char line[768];
+
+        snprintf(line, sizeof(line), "%stenet-bot 内部错误：读取上下文失败：%.500s", prefix, error);
+        (void)send_reply_line(fd, message->private_chat, message->sender, line);
+        goto out;
+    }
+    if (bot_ollama_chat_messages(config, messages, message_count, &answer, error, sizeof(error)) != 0) {
         char line[768];
 
         snprintf(line, sizeof(line), "%sOllama 调用失败：%.650s", prefix, error);
@@ -327,12 +413,17 @@ static void answer_message(const bot_config_t *config,
         fprintf(stderr, "tenet-bot: 发送回复失败\n");
         goto out;
     }
-    remember_exchange(config, memory, message->sender, question, answer.data);
+    remember_exchange(config, memory, message->sender,
+                      message->private_chat ? message->sender : "",
+                      question, answer.data);
 
 out:
+    free(messages);
+    bot_memory_chat_history_free(&history);
     bot_vector_free(&query_vector);
     bot_str_free(&query_vector_json);
-    bot_str_free(&prompt);
+    bot_str_free(&reference_context);
+    bot_str_free(&system_message);
     bot_str_free(&answer);
 }
 
@@ -341,8 +432,16 @@ static void handle_event(const bot_config_t *config,
                          int fd,
                          const bot_event_t *event)
 {
+    char error[512];
+
     if (sender_is_bot(config, event->sender) || sender_is_bot(config, event->sender_display)) {
         return;
+    }
+    if (bot_memory_store_observed_message(memory, event->sender,
+                                          event->private_chat ? event->sender : "",
+                                          event->text,
+                                          error, sizeof(error)) != 0) {
+        fprintf(stderr, "tenet-bot: 保存最近上下文失败: %s\n", error);
     }
     if (!event->private_chat && !message_mentions_bot(config, event->text)) {
         return;

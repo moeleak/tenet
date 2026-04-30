@@ -242,7 +242,7 @@ TENET_INTERNAL_USERS=tenet-bot ./tenet --ssh-backend --socket /tmp/tenet.sock
 --memory-db PATH           SQLite 记忆库路径
 --vector-extension PATH    sqlite-vss vector0 扩展路径
 --vss-extension PATH       sqlite-vss vss0 扩展路径
---context-messages N       每次请求带最近 N 条上下文，默认 50
+--context-messages N       每次请求带最近 N 条上下文，默认 12，内部最多使用 16 条
 --memory-top-k N           全局/用户长期记忆各检索 N 条，默认 6
 --reset-memory             清空长期记忆后启动
 ```
@@ -257,4 +257,4 @@ docker compose up -d --build
 
 `tenet-bot` 通过结构化 Unix socket 协议接收消息，不读取终端屏幕或 ANSI UI；私聊事件只会触发私聊回复，不会同步到大厅。
 
-`tenet-bot` 会把每次问答写入 SQLite，同时写入全局记忆和该用户记忆；后续请求会先用 `/api/embed` 做向量检索，再把相关记忆、摘要和最近上下文放进 `/api/chat` 的 prompt。
+`tenet-bot` 会把每次问答写入 SQLite，同时写入全局记忆和该用户记忆；后续请求会先用 `/api/embed` 做向量检索，把相关记忆和摘要放进 `system` 消息，再把最近聊天记录作为 `/api/chat` 的 `messages[]` 逐条传入，不再拼接成 `bot 答:` 这类文本 prompt。

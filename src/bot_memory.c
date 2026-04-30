@@ -288,6 +288,53 @@ int bot_memory_mark_seen(bot_memory_t *memory, const char *fingerprint)
     return rc;
 }
 
+void bot_memory_chat_history_init(bot_memory_chat_history_t *history)
+{
+    history->items = NULL;
+    history->count = 0;
+    history->cap = 0;
+}
+
+void bot_memory_chat_history_free(bot_memory_chat_history_t *history)
+{
+    size_t index;
+
+    for (index = 0; index < history->count; index++) {
+        free(history->items[index].content);
+    }
+    free(history->items);
+    history->items = NULL;
+    history->count = 0;
+    history->cap = 0;
+}
+
+static int bot_memory_chat_history_add(bot_memory_chat_history_t *history,
+                                       const char *role,
+                                       const char *content)
+{
+    bot_memory_chat_message_t *next;
+
+    if (history->count == history->cap) {
+        size_t cap = history->cap > 0 ? history->cap * 2 : 16;
+
+        next = realloc(history->items, cap * sizeof(history->items[0]));
+        if (next == NULL) {
+            return -1;
+        }
+        history->items = next;
+        history->cap = cap;
+    }
+    snprintf(history->items[history->count].role,
+             sizeof(history->items[history->count].role),
+             "%s", role != NULL ? role : "user");
+    history->items[history->count].content = bot_strdup_safe(content != NULL ? content : "");
+    if (history->items[history->count].content == NULL) {
+        return -1;
+    }
+    history->count++;
+    return 0;
+}
+
 static int insert_message(bot_memory_t *memory,
                           const char *speaker,
                           const char *role,
@@ -313,6 +360,33 @@ static int insert_message(bot_memory_t *memory,
     return rc;
 }
 
+int bot_memory_store_observed_message(bot_memory_t *memory,
+                                      const char *sender,
+                                      const char *target_user,
+                                      const char *content,
+                                      char *error,
+                                      size_t error_size)
+{
+    if (insert_message(memory, sender, "user", target_user, content) != 0) {
+        set_sqlite_error(memory, error, error_size, "保存用户发言失败");
+        return -1;
+    }
+    return 0;
+}
+
+int bot_memory_store_answer(bot_memory_t *memory,
+                            const char *target_user,
+                            const char *answer,
+                            char *error,
+                            size_t error_size)
+{
+    if (insert_message(memory, "tenet-bot", "assistant", target_user, answer) != 0) {
+        set_sqlite_error(memory, error, error_size, "保存 bot 回复失败");
+        return -1;
+    }
+    return 0;
+}
+
 int bot_memory_store_exchange(bot_memory_t *memory,
                               const char *sender,
                               const char *question,
@@ -330,6 +404,7 @@ int bot_memory_store_exchange(bot_memory_t *memory,
         return -1;
     }
     if (exec_sql(memory, "COMMIT", error, error_size) != 0) {
+        (void)exec_sql(memory, "ROLLBACK", NULL, 0);
         return -1;
     }
     return 0;
@@ -420,7 +495,13 @@ static int append_item_by_id(bot_memory_t *memory,
                     return -1;
                 }
             }
-            if (bot_str_appendf(out, "- %s\n", content) != 0) {
+            const char *answer_marker = strstr(content, "\n" "bot " "答:");
+            size_t content_len = answer_marker != NULL ?
+                                 (size_t)(answer_marker - content) : strlen(content);
+
+            if (bot_str_append(out, "- ") != 0 ||
+                bot_str_append_len(out, content, content_len) != 0 ||
+                bot_str_append_char(out, '\n') != 0) {
                 sqlite3_finalize(stmt);
                 return -1;
             }
@@ -721,7 +802,7 @@ int bot_memory_append_recent_context(bot_memory_t *memory,
     if (sqlite3_prepare_v2(memory->db,
                            "SELECT speaker, role, content FROM ("
                            "  SELECT id, speaker, role, content FROM messages "
-                           "  WHERE target_user=? OR role='user' "
+                           "  WHERE role='user' AND (target_user='' OR target_user=?) "
                            "  ORDER BY id DESC LIMIT ?"
                            ") ORDER BY id ASC",
                            -1, &stmt, NULL) != SQLITE_OK) {
@@ -748,6 +829,69 @@ int bot_memory_append_recent_context(bot_memory_t *memory,
             sqlite3_finalize(stmt);
             return -1;
         }
+    }
+    sqlite3_finalize(stmt);
+    return 0;
+}
+
+int bot_memory_load_recent_chat_history(bot_memory_t *memory,
+                                        const char *username,
+                                        int include_private,
+                                        int limit,
+                                        bot_memory_chat_history_t *history,
+                                        char *error,
+                                        size_t error_size)
+{
+    sqlite3_stmt *stmt = NULL;
+    const char *sql_public =
+        "SELECT speaker, role, content FROM ("
+        "  SELECT id, speaker, role, content FROM messages "
+        "  WHERE target_user='' ORDER BY id DESC LIMIT ?"
+        ") ORDER BY id ASC";
+    const char *sql_private =
+        "SELECT speaker, role, content FROM ("
+        "  SELECT id, speaker, role, content FROM messages "
+        "  WHERE target_user='' OR target_user=? ORDER BY id DESC LIMIT ?"
+        ") ORDER BY id ASC";
+
+    if (limit <= 0) {
+        return 0;
+    }
+    if (sqlite3_prepare_v2(memory->db, include_private ? sql_private : sql_public,
+                           -1, &stmt, NULL) != SQLITE_OK) {
+        set_sqlite_error(memory, error, error_size, "读取最近对话失败");
+        return -1;
+    }
+    if (include_private) {
+        sqlite3_bind_text(stmt, 1, username != NULL ? username : "", -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 2, limit);
+    } else {
+        sqlite3_bind_int(stmt, 1, limit);
+    }
+    while (sqlite3_step(stmt) == SQLITE_ROW) {
+        const char *speaker = (const char *)sqlite3_column_text(stmt, 0);
+        const char *role = (const char *)sqlite3_column_text(stmt, 1);
+        const char *content = (const char *)sqlite3_column_text(stmt, 2);
+        bot_str_t line;
+        int rc;
+
+        bot_str_init(&line);
+        if (strcmp(role != NULL ? role : "", "assistant") == 0) {
+            rc = bot_str_append(&line, content != NULL ? content : "");
+            role = "assistant";
+        } else {
+            rc = bot_str_appendf(&line, "%s: %s",
+                                 speaker != NULL ? speaker : "user",
+                                 content != NULL ? content : "");
+            role = "user";
+        }
+        if (rc != 0 || bot_memory_chat_history_add(history, role, line.data != NULL ? line.data : "") != 0) {
+            bot_str_free(&line);
+            sqlite3_finalize(stmt);
+            set_error(error, error_size, "保存最近对话失败");
+            return -1;
+        }
+        bot_str_free(&line);
     }
     sqlite3_finalize(stmt);
     return 0;
@@ -808,9 +952,11 @@ int bot_memory_collect_summary_source(bot_memory_t *memory,
     sqlite3_stmt *stmt = NULL;
     long long updated = summary_updated_id(memory, scope, username);
     const char *sql_global =
-        "SELECT id, speaker, role, content FROM messages WHERE id>? ORDER BY id DESC LIMIT ?";
+        "SELECT id, speaker, role, content FROM messages "
+        "WHERE id>? AND role='user' AND target_user='' ORDER BY id DESC LIMIT ?";
     const char *sql_user =
-        "SELECT id, speaker, role, content FROM messages WHERE id>? AND target_user=? ORDER BY id DESC LIMIT ?";
+        "SELECT id, speaker, role, content FROM messages "
+        "WHERE id>? AND role='user' AND speaker=? ORDER BY id DESC LIMIT ?";
 
     *max_message_id_out = max_message_id(memory);
     if (sqlite3_prepare_v2(memory->db,
